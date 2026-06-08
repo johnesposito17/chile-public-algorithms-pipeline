@@ -127,10 +127,22 @@ def scrape_google_news(term):
         feed = feedparser.parse(r.content)
         results = []
         for entry in feed.entries:
-            link  = entry.get("link", "")
-            title = entry.get("title", "")
+            link         = entry.get("link", "")
+            title        = entry.get("title", "")
+            source_info  = entry.get("source", {})
+            source_href  = source_info.get("href", "") if isinstance(source_info, dict) else ""
+            source_title = source_info.get("title", "") if isinstance(source_info, dict) else ""
             if link.startswith("http"):
-                results.append({"url": link, "title": title, "source": f'Google News: "{term}"'})
+                results.append({
+                    "url":          link,
+                    "title":        title,
+                    "source":       f'Google News: "{term}"',
+                    # Store publisher info so triage can use the title instead
+                    # of fetching the JS-redirect URL
+                    "gnews_title":  title,
+                    "gnews_source": source_href,
+                    "gnews_pub":    source_title,
+                })
         return results
     except Exception as e:
         print(f"    ERROR RSS '{term}': {e}")
@@ -265,29 +277,87 @@ relevant = false si:
 """
 
 
+def resolve_gnews_url(candidate):
+    """
+    Google News RSS URLs redirect via JavaScript — requests can't follow them.
+    Use DuckDuckGo site-search with the article title to find the actual URL
+    on the publisher's domain.
+    Returns the resolved URL, or None if resolution fails.
+    """
+    title       = candidate.get("gnews_title", "")
+    source_href = candidate.get("gnews_source", "")
+    if not title or not source_href:
+        return None
+
+    from urllib.parse import urlparse, quote
+    domain = urlparse(source_href).netloc
+    if not domain:
+        return None
+
+    # Search DuckDuckGo Lite (plain HTML, no JS required) for the title on the source domain
+    query      = f'site:{domain} {title[:80]}'
+    search_url = f"https://lite.duckduckgo.com/lite/?q={quote(query)}"
+    try:
+        r    = requests.get(search_url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if domain in href and href.startswith("http"):
+                return href
+    except Exception:
+        pass
+
+    # Fallback: try the publisher's homepage search (WordPress ?s= pattern)
+    try:
+        wp_search = f"{source_href.rstrip('/')}/?s={quote(title[:50])}"
+        r         = requests.get(wp_search, headers=HEADERS, timeout=10)
+        soup      = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if domain in href and is_article_link(href):
+                return href
+    except Exception:
+        pass
+
+    return None
+
+
 def triage_one(candidate, client):
-    url  = candidate["url"]
-    text = fetch_url(url)
+    url = candidate["url"]
 
-    # Pre-filter: skip failed fetches or suspiciously short content
-    if len(text) < 300 or text.startswith("[ERROR"):
-        return {
-            "url":         url,
-            "relevant":    False,
-            "reason":      "Contenido insuficiente o error al obtener la página",
-            "system_name": None,
-            "institution": None,
-            "orig_source": candidate.get("source", ""),
-        }
+    is_gnews = "news.google.com" in url
 
-    truncated = text[:4000]
+    if is_gnews:
+        # Google News URLs redirect via JavaScript — fetch_url gets ~15 chars.
+        # Use the article title + publisher from the RSS feed for triage instead.
+        title  = candidate.get("gnews_title", "")
+        pub    = candidate.get("gnews_pub", "")
+        source = candidate.get("gnews_source", "")
+        if not title:
+            return {
+                "url": url, "relevant": False,
+                "reason": "URL de Google News sin título disponible",
+                "system_name": None, "institution": None,
+                "orig_source": candidate.get("source", ""), "is_gnews": True,
+            }
+        content = f"Título: {title}\nPublicado por: {pub} ({source})"
+    else:
+        text = fetch_url(url)
+        if len(text) < 300 or text.startswith("[ERROR"):
+            return {
+                "url": url, "relevant": False,
+                "reason": "Contenido insuficiente o error al obtener la página",
+                "system_name": None, "institution": None,
+                "orig_source": candidate.get("source", ""), "is_gnews": False,
+            }
+        content = f"URL: {url}\n\nContenido:\n{text[:4000]}"
 
     try:
         resp = client.messages.create(
             model=TRIAGE_MODEL,
             max_tokens=300,
             system=TRIAGE_SYSTEM,
-            messages=[{"role": "user", "content": f"URL: {url}\n\nContenido:\n{truncated}"}],
+            messages=[{"role": "user", "content": content}],
         )
         raw = resp.content[0].text.strip()
         if raw.startswith("```"):
@@ -300,6 +370,12 @@ def triage_one(candidate, client):
 
     result["url"]         = url
     result["orig_source"] = candidate.get("source", "")
+    result["is_gnews"]    = is_gnews
+    # Carry forward RSS metadata so the generate phase can resolve the real URL
+    if is_gnews:
+        result["gnews_title"]  = candidate.get("gnews_title", "")
+        result["gnews_source"] = candidate.get("gnews_source", "")
+        result["gnews_pub"]    = candidate.get("gnews_pub", "")
     return result
 
 
@@ -446,9 +522,28 @@ def phase_generate(groups, client, output_path):
 
         blocks = []
         for item in group:
-            print(f"    Fetching {item['url'][:70]}...")
-            text = fetch_url(item["url"])
-            blocks.append({"url": item["url"], "text": text})
+            fetch_url_target = item["url"]
+
+            # Google News redirect URLs can't be fetched directly.
+            # Try to resolve the real article URL via DuckDuckGo search.
+            if item.get("is_gnews"):
+                resolved = resolve_gnews_url(item)
+                if resolved:
+                    print(f"    Resolved GNews → {resolved[:70]}")
+                    fetch_url_target = resolved
+                else:
+                    print(f"    Could not resolve GNews URL — skipping content fetch")
+                    # Use title as minimal context so Claude has something to work with
+                    blocks.append({
+                        "url":  item["url"],
+                        "text": f"Título del artículo: {item.get('gnews_title', '')}\n"
+                                f"Publicado por: {item.get('gnews_pub', '')} ({item.get('gnews_source', '')})",
+                    })
+                    continue
+
+            print(f"    Fetching {fetch_url_target[:70]}...")
+            text = fetch_url(fetch_url_target)
+            blocks.append({"url": fetch_url_target, "text": text})
 
         print(f"    Enviando {len(blocks)} fuente(s) a Claude para extracción...")
         ficha = extract_ficha_fields(blocks, client)
