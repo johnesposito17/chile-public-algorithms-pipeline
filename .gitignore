@@ -1,0 +1,24 @@
+# Node
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated outputs — not committed; re-run the scripts to produce them
+fichas_output/
+candidate_urls_*.txt
+
+# macOS
+.DS_Store
+.Rhistory
+
+# Environment / secrets
+.env
+*.env
+
+# Claude Code internal
+.claude/

@@ -1,0 +1,11 @@
+{
+  "name": "goblab-scraper",
+  "version": "1.0.0",
+  "description": "Step 1: Find candidate URLs about AI/algorithmic systems in Chilean public institutions",
+  "main": "scraper.js",
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0",
+    "xml2js": "^0.6.2"
+  }
+}
