@@ -48,53 +48,65 @@ GOOGLE_NEWS_TERMS = [
     "machine learning sector público Chile",
     "analítica predictiva gobierno Chile",
     "modelos predictivos sector público Chile",
+    # Additional terms targeting specific government/tender contexts
+    "licitación inteligencia artificial Chile gobierno",
+    "software IA ministerio Chile",
+    "plataforma digital gobierno Chile algoritmo",
+    "sistema predictivo servicio público Chile",
 ]
 
+# MercadoPublico's search pages are JavaScript-rendered — the HTML they return
+# is just the navigation shell, not the actual tender listings. Replaced with
+# government news portals that serve full HTML article pages.
 INSTITUTIONAL_SOURCES = [
     {
         "name": "ANID — Noticias",
         "url":  "https://www.anid.cl/noticias/",
         "base": "https://www.anid.cl",
+        "article_only": True,   # filter out nav links; keep only article slugs
     },
     {
         "name": "ANID — Búsqueda IA",
         "url":  "https://www.anid.cl/?s=inteligencia+artificial",
         "base": "https://www.anid.cl",
+        "article_only": True,
     },
     {
-        "name": "MercadoPublico — inteligencia artificial",
-        "url":  "https://www.mercadopublico.cl/Procurement/Modules/RFB/ListSearch.aspx?ModuleType=1&FilterType=1&FilterValue=inteligencia+artificial",
-        "base": "https://www.mercadopublico.cl",
+        "name": "Ministerio de Ciencia — Noticias",
+        "url":  "https://www.minciencia.gob.cl/noticias/",
+        "base": "https://www.minciencia.gob.cl",
+        "article_only": True,
     },
     {
-        "name": "MercadoPublico — machine learning",
-        "url":  "https://www.mercadopublico.cl/Procurement/Modules/RFB/ListSearch.aspx?ModuleType=1&FilterType=1&FilterValue=machine+learning",
-        "base": "https://www.mercadopublico.cl",
+        "name": "Gobierno de Chile — Noticias",
+        "url":  "https://www.gob.cl/noticias/",
+        "base": "https://www.gob.cl",
+        "article_only": True,
     },
     {
-        "name": "MercadoPublico — algoritmo",
-        "url":  "https://www.mercadopublico.cl/Procurement/Modules/RFB/ListSearch.aspx?ModuleType=1&FilterType=1&FilterValue=algoritmo",
-        "base": "https://www.mercadopublico.cl",
+        "name": "División Gobierno Digital",
+        "url":  "https://digital.gob.cl/noticias/",
+        "base": "https://digital.gob.cl",
+        "article_only": True,
     },
     {
         "name": "DIPRES — Balance de Gestión Integral",
         "url":  "https://www.dipres.gob.cl/597/w3-propertyvalue-15160.html",
         "base": "https://www.dipres.gob.cl",
+        "article_only": False,
     },
     {
-        "name": "DIPRES — Documentos institucionales",
-        "url":  "https://www.dipres.gob.cl/597/w3-channel.html",
-        "base": "https://www.dipres.gob.cl",
-    },
-    {
-        "name": "TransformacionPublica",
-        "url":  "https://www.transformacionpublica.cl/",
-        "base": "https://www.transformacionpublica.cl",
+        "name": "TransformacionPublica — Blog",
+        "url":  "https://transformacionpublica.cl/blog/",
+        "base": "https://transformacionpublica.cl",
+        "article_only": True,
     },
 ]
 
+# A realistic browser UA passes CloudFront and most CDN bot-checks
 HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (compatible; GobLabResearchBot/1.0)",
+    "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
 }
 
@@ -107,7 +119,12 @@ def scrape_google_news(term):
     q   = requests.utils.quote(term)
     url = f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=CL&ceid=CL:es-419"
     try:
-        feed    = feedparser.parse(url)
+        # feedparser.parse(url) uses its own HTTP client which Google blocks.
+        # Fetch the RSS bytes ourselves with our headers, then hand the content
+        # to feedparser for parsing.
+        r    = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
         results = []
         for entry in feed.entries:
             link  = entry.get("link", "")
@@ -135,6 +152,21 @@ def resolve_href(href, base):
     return None
 
 
+def is_article_link(url):
+    """
+    Heuristic: news article URLs have long, word-rich slugs like
+    /laben-chile-crea-sistema-de-vigilancia-para-el-sector/
+    Navigation URLs have short slugs like /convenios/ or /concursos/
+    """
+    from urllib.parse import urlparse
+    path  = urlparse(url).path.rstrip("/")
+    if not path:
+        return False
+    slug  = path.split("/")[-1]
+    words = [w for w in slug.replace("-", " ").replace("_", " ").split() if len(w) > 1]
+    return len(words) >= 5
+
+
 def scrape_institutional(source):
     try:
         r = requests.get(source["url"], headers=HEADERS, timeout=20, allow_redirects=True)
@@ -142,6 +174,8 @@ def scrape_institutional(source):
         soup    = BeautifulSoup(r.text, "html.parser")
         results = []
         seen    = set()
+        article_only = source.get("article_only", False)
+
         for tag in soup.find_all("a", href=True):
             href     = tag.get("href", "")
             text     = tag.get_text(strip=True)
@@ -151,6 +185,9 @@ def scrape_institutional(source):
             if any(resolved.lower().endswith(ext) for ext in SKIP_EXTENSIONS):
                 continue
             if any(d in resolved for d in SKIP_DOMAINS):
+                continue
+            # When article_only is set, skip links that look like nav/category pages
+            if article_only and not is_article_link(resolved):
                 continue
             if resolved in seen:
                 continue
