@@ -2,10 +2,10 @@
 """
 GobLab Pipeline — End-to-end automated system
 
-Phase 1  SCRAPE   — Google News RSS + institutional sites → candidate URLs
-Phase 2  TRIAGE   — Claude reads each article; keeps only specific Chilean
-                    public-sector AI/algorithmic systems; discards general
-                    trends, foreign news, sports, video-only pages
+Phase 1  SCRAPE   — Direct Chilean news RSS feeds (keyword-filtered) +
+                    institutional sites → candidate URLs with readable content
+Phase 2  TRIAGE   — Claude reads each article's full text; keeps only specific
+                    Chilean public-sector AI/algorithmic systems
 Phase 3  GROUP    — Clusters URLs that describe the same project so that
                     multiple sources become multiple APA citations in one ficha
 Phase 4  GENERATE — Produces one Word ficha per project cluster
@@ -39,31 +39,51 @@ EXTRACT_MODEL = "claude-opus-4-8"            # thorough for final ficha extracti
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
 
-GOOGLE_NEWS_TERMS = [
-    "inteligencia artificial piloto Chile",
-    "IA implementación gobierno Chile",
-    "sistema IA piloto Chile",
-    "algoritmos sector público Chile",
-    "automatización decisiones gobierno Chile",
-    "machine learning sector público Chile",
-    "analítica predictiva gobierno Chile",
-    "modelos predictivos sector público Chile",
-    # Additional terms targeting specific government/tender contexts
-    "licitación inteligencia artificial Chile gobierno",
-    "software IA ministerio Chile",
-    "plataforma digital gobierno Chile algoritmo",
-    "sistema predictivo servicio público Chile",
+# Direct RSS feeds from Chilean news outlets whose entries have real article
+# URLs (not Google News JavaScript-redirect URLs). This lets us download and
+# read the full article text for every candidate before sending it to Claude.
+DIRECT_NEWS_FEEDS = [
+    {"name": "Radio U. Chile",  "url": "https://radio.uchile.cl/feed/"},
+    {"name": "La Tercera",      "url": "https://www.latercera.com/rss/"},
+    {"name": "CIPER Chile",     "url": "https://www.ciperchile.cl/feed/"},
+    {"name": "FayerWayer",      "url": "https://www.fayerwayer.com/feed/"},
+    {"name": "The Clinic",      "url": "https://www.theclinic.cl/feed/"},
+    {"name": "ANID RSS",        "url": "https://anid.cl/feed/"},
 ]
 
-# MercadoPublico's search pages are JavaScript-rendered — the HTML they return
-# is just the navigation shell, not the actual tender listings. Replaced with
-# government news portals that serve full HTML article pages.
+# Keywords for cheap pre-filtering of RSS entries before Claude triage.
+# At least one must appear (case-insensitive) in the article title or description.
+AI_KEYWORDS = [
+    "inteligencia artificial",
+    "algoritmo",
+    "machine learning",
+    "aprendizaje automático",
+    "aprendizaje automatico",
+    "automatización",
+    "automatizacion",
+    "modelo predictivo",
+    "analítica predictiva",
+    "analitica predictiva",
+    "deep learning",
+    "reconocimiento facial",
+    "procesamiento de lenguaje natural",
+    "chatbot",
+    "gobierno digital",
+    "datos abiertos",
+    "sistema de decisión",
+    "sistema de decision",
+    "predicción",
+    "prediccion",
+    "fiscalización digital",
+    "fiscalizacion digital",
+]
+
 INSTITUTIONAL_SOURCES = [
     {
         "name": "ANID — Noticias",
         "url":  "https://www.anid.cl/noticias/",
         "base": "https://www.anid.cl",
-        "article_only": True,   # filter out nav links; keep only article slugs
+        "article_only": True,
     },
     {
         "name": "ANID — Búsqueda IA",
@@ -103,7 +123,7 @@ INSTITUTIONAL_SOURCES = [
     },
 ]
 
-# A realistic browser UA passes CloudFront and most CDN bot-checks
+# Realistic browser UA passes CloudFront and most CDN bot-checks
 HEADERS = {
     "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -115,38 +135,44 @@ SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com
 
 # ── PHASE 1: SCRAPE ───────────────────────────────────────────────────────────
 
-def scrape_google_news(term):
-    q   = requests.utils.quote(term)
-    url = f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=CL&ceid=CL:es-419"
-    try:
-        # feedparser.parse(url) uses its own HTTP client which Google blocks.
-        # Fetch the RSS bytes ourselves with our headers, then hand the content
-        # to feedparser for parsing.
-        r    = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        feed = feedparser.parse(r.content)
-        results = []
-        for entry in feed.entries:
-            link         = entry.get("link", "")
-            title        = entry.get("title", "")
-            source_info  = entry.get("source", {})
-            source_href  = source_info.get("href", "") if isinstance(source_info, dict) else ""
-            source_title = source_info.get("title", "") if isinstance(source_info, dict) else ""
-            if link.startswith("http"):
+def matches_ai_keywords(text: str) -> bool:
+    """Return True if text contains at least one AI-related keyword."""
+    t = text.lower()
+    return any(kw in t for kw in AI_KEYWORDS)
+
+
+def scrape_direct_feeds():
+    """Fetch Chilean news RSS feeds and pre-filter entries by AI keywords."""
+    results = []
+    for feed_info in DIRECT_NEWS_FEEDS:
+        try:
+            r = requests.get(feed_info["url"], headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            feed  = feedparser.parse(r.content)
+            count = 0
+            for entry in feed.entries:
+                link    = entry.get("link", "")
+                title   = entry.get("title", "")
+                summary = entry.get("summary", "") or entry.get("description", "")
+
+                if not link.startswith("http"):
+                    continue
+                if "news.google.com" in link:
+                    continue  # skip any accidental Google News redirect URLs
+
+                if not matches_ai_keywords(title + " " + summary):
+                    continue
+
                 results.append({
-                    "url":          link,
-                    "title":        title,
-                    "source":       f'Google News: "{term}"',
-                    # Store publisher info so triage can use the title instead
-                    # of fetching the JS-redirect URL
-                    "gnews_title":  title,
-                    "gnews_source": source_href,
-                    "gnews_pub":    source_title,
+                    "url":    link,
+                    "title":  title,
+                    "source": f"RSS: {feed_info['name']}",
                 })
-        return results
-    except Exception as e:
-        print(f"    ERROR RSS '{term}': {e}")
-        return []
+                count += 1
+            print(f"    {feed_info['name']}: {count} artículos con palabras clave IA")
+        except Exception as e:
+            print(f"    ERROR {feed_info['name']}: {e}")
+    return results
 
 
 def resolve_href(href, base):
@@ -166,9 +192,8 @@ def resolve_href(href, base):
 
 def is_article_link(url):
     """
-    Heuristic: news article URLs have long, word-rich slugs like
-    /laben-chile-crea-sistema-de-vigilancia-para-el-sector/
-    Navigation URLs have short slugs like /convenios/ or /concursos/
+    Heuristic: news article URLs have long, word-rich slugs.
+    Navigation pages have short slugs like /convenios/ or /concursos/
     """
     from urllib.parse import urlparse
     path  = urlparse(url).path.rstrip("/")
@@ -183,9 +208,9 @@ def scrape_institutional(source):
     try:
         r = requests.get(source["url"], headers=HEADERS, timeout=20, allow_redirects=True)
         r.raise_for_status()
-        soup    = BeautifulSoup(r.text, "html.parser")
-        results = []
-        seen    = set()
+        soup         = BeautifulSoup(r.text, "html.parser")
+        results      = []
+        seen         = set()
         article_only = source.get("article_only", False)
 
         for tag in soup.find_all("a", href=True):
@@ -198,7 +223,6 @@ def scrape_institutional(source):
                 continue
             if any(d in resolved for d in SKIP_DOMAINS):
                 continue
-            # When article_only is set, skip links that look like nav/category pages
             if article_only and not is_article_link(resolved):
                 continue
             if resolved in seen:
@@ -218,11 +242,8 @@ def phase_scrape(max_candidates):
 
     candidates = []
 
-    print("\n  [Google News RSS]")
-    for term in GOOGLE_NEWS_TERMS:
-        results = scrape_google_news(term)
-        print(f"    \"{term}\": {len(results)} artículos")
-        candidates.extend(results)
+    print("\n  [Feeds RSS directos — artículos con contenido descargable]")
+    candidates.extend(scrape_direct_feeds())
 
     print("\n  [Sitios institucionales]")
     for source in INSTITUTIONAL_SOURCES:
@@ -277,80 +298,19 @@ relevant = false si:
 """
 
 
-def resolve_gnews_url(candidate):
-    """
-    Google News RSS URLs redirect via JavaScript — requests can't follow them.
-    Use DuckDuckGo site-search with the article title to find the actual URL
-    on the publisher's domain.
-    Returns the resolved URL, or None if resolution fails.
-    """
-    title       = candidate.get("gnews_title", "")
-    source_href = candidate.get("gnews_source", "")
-    if not title or not source_href:
-        return None
-
-    from urllib.parse import urlparse, quote
-    domain = urlparse(source_href).netloc
-    if not domain:
-        return None
-
-    # Search DuckDuckGo Lite (plain HTML, no JS required) for the title on the source domain
-    query      = f'site:{domain} {title[:80]}'
-    search_url = f"https://lite.duckduckgo.com/lite/?q={quote(query)}"
-    try:
-        r    = requests.get(search_url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if domain in href and href.startswith("http"):
-                return href
-    except Exception:
-        pass
-
-    # Fallback: try the publisher's homepage search (WordPress ?s= pattern)
-    try:
-        wp_search = f"{source_href.rstrip('/')}/?s={quote(title[:50])}"
-        r         = requests.get(wp_search, headers=HEADERS, timeout=10)
-        soup      = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if domain in href and is_article_link(href):
-                return href
-    except Exception:
-        pass
-
-    return None
-
-
 def triage_one(candidate, client):
-    url = candidate["url"]
+    url  = candidate["url"]
+    text = fetch_url(url)
 
-    is_gnews = "news.google.com" in url
+    if len(text) < 300 or text.startswith("[ERROR"):
+        return {
+            "url": url, "relevant": False,
+            "reason": "Contenido insuficiente o error al obtener la página",
+            "system_name": None, "institution": None,
+            "orig_source": candidate.get("source", ""),
+        }
 
-    if is_gnews:
-        # Google News URLs redirect via JavaScript — fetch_url gets ~15 chars.
-        # Use the article title + publisher from the RSS feed for triage instead.
-        title  = candidate.get("gnews_title", "")
-        pub    = candidate.get("gnews_pub", "")
-        source = candidate.get("gnews_source", "")
-        if not title:
-            return {
-                "url": url, "relevant": False,
-                "reason": "URL de Google News sin título disponible",
-                "system_name": None, "institution": None,
-                "orig_source": candidate.get("source", ""), "is_gnews": True,
-            }
-        content = f"Título: {title}\nPublicado por: {pub} ({source})"
-    else:
-        text = fetch_url(url)
-        if len(text) < 300 or text.startswith("[ERROR"):
-            return {
-                "url": url, "relevant": False,
-                "reason": "Contenido insuficiente o error al obtener la página",
-                "system_name": None, "institution": None,
-                "orig_source": candidate.get("source", ""), "is_gnews": False,
-            }
-        content = f"URL: {url}\n\nContenido:\n{text[:4000]}"
+    content = f"URL: {url}\n\nContenido:\n{text[:4000]}"
 
     try:
         resp = client.messages.create(
@@ -370,19 +330,13 @@ def triage_one(candidate, client):
 
     result["url"]         = url
     result["orig_source"] = candidate.get("source", "")
-    result["is_gnews"]    = is_gnews
-    # Carry forward RSS metadata so the generate phase can resolve the real URL
-    if is_gnews:
-        result["gnews_title"]  = candidate.get("gnews_title", "")
-        result["gnews_source"] = candidate.get("gnews_source", "")
-        result["gnews_pub"]    = candidate.get("gnews_pub", "")
     return result
 
 
 def phase_triage(candidates, client):
     print("\n" + "═" * 65)
     print("  FASE 2 — TRIAGE")
-    print(f"  Claude ({TRIAGE_MODEL}) lee cada artículo y evalúa relevancia")
+    print(f"  Claude ({TRIAGE_MODEL}) lee el texto completo de cada artículo")
     print("═" * 65)
     print(f"\n  Analizando {len(candidates)} URLs... (esto puede tardar varios minutos)\n")
 
@@ -393,8 +347,8 @@ def phase_triage(candidates, client):
     with ThreadPoolExecutor(max_workers=6) as pool:
         future_to_idx = {pool.submit(triage_one, c, client): i for i, c in enumerate(candidates)}
         for future in as_completed(future_to_idx):
-            idx         = future_to_idx[future]
-            result      = future.result()
+            idx          = future_to_idx[future]
+            result       = future.result()
             results[idx] = result
             done        += 1
 
@@ -522,28 +476,16 @@ def phase_generate(groups, client, output_path):
 
         blocks = []
         for item in group:
-            fetch_url_target = item["url"]
+            print(f"    Fetching {item['url'][:70]}...")
+            text = fetch_url(item["url"])
+            if len(text) >= 300 and not text.startswith("[ERROR"):
+                blocks.append({"url": item["url"], "text": text})
+            else:
+                print(f"    Poco contenido ({len(text)} chars) — omitiendo esta fuente")
 
-            # Google News redirect URLs can't be fetched directly.
-            # Try to resolve the real article URL via DuckDuckGo search.
-            if item.get("is_gnews"):
-                resolved = resolve_gnews_url(item)
-                if resolved:
-                    print(f"    Resolved GNews → {resolved[:70]}")
-                    fetch_url_target = resolved
-                else:
-                    print(f"    Could not resolve GNews URL — skipping content fetch")
-                    # Use title as minimal context so Claude has something to work with
-                    blocks.append({
-                        "url":  item["url"],
-                        "text": f"Título del artículo: {item.get('gnews_title', '')}\n"
-                                f"Publicado por: {item.get('gnews_pub', '')} ({item.get('gnews_source', '')})",
-                    })
-                    continue
-
-            print(f"    Fetching {fetch_url_target[:70]}...")
-            text = fetch_url(fetch_url_target)
-            blocks.append({"url": fetch_url_target, "text": text})
+        if not blocks:
+            print(f"    Sin contenido disponible — omitiendo ficha para este grupo")
+            continue
 
         print(f"    Enviando {len(blocks)} fuente(s) a Claude para extracción...")
         ficha = extract_ficha_fields(blocks, client)

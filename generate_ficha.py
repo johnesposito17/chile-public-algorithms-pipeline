@@ -40,11 +40,17 @@ DARK = RGBColor(0x1A, 0x1A, 0x1A)
 
 # ── CONTENT FETCHING ──────────────────────────────────────────────────────────
 
+_FETCH_HEADERS = {
+    "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+}
+
+
 def fetch_url(url: str) -> str:
     """Fetch text content from a URL (HTML or PDF)."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; GobLabBot/1.0)"}
     try:
-        r = requests.get(url, headers=headers, timeout=20)
+        r = requests.get(url, headers=_FETCH_HEADERS, timeout=20, allow_redirects=True)
         r.raise_for_status()
         content_type = r.headers.get("content-type", "")
         if "pdf" in content_type or url.lower().endswith(".pdf"):
