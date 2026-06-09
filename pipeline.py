@@ -2,21 +2,32 @@
 """
 GobLab Pipeline — End-to-end automated system
 
-Phase 1  SCRAPE   — Google News RSS (12 terms) + direct Chilean news RSS feeds +
-                    institutional sites → candidate URLs
-Phase 1b RESOLVE  — Playwright follows Google News JavaScript redirects to get
-                    the real article URL for every candidate
+Phase 1  SCRAPE   — Google News RSS (20 terms, last 12 months) + direct Chilean
+                    news RSS feeds + expanded institutional sites → candidate URLs
+Phase 1b RESOLVE  — Playwright (async, shared browser) follows Google News JS
+                    redirects to get real article URLs — much faster than v1
 Phase 2  TRIAGE   — Claude reads each article's full text; keeps only specific
-                    Chilean public-sector AI/algorithmic systems; checks against
-                    the existing algorithm database to avoid duplicates
+                    Chilean public-sector AI/algorithmic systems; explicitly
+                    rejects: education programs about AI, dead links, articles
+                    about GobLab's own repository, private-sector-only systems
 Phase 3  GROUP    — Clusters URLs that describe the same project
 Phase 4  GENERATE — Produces one Word ficha per project cluster
+
+Known issues in previous runs (fixed here):
+  - Triage was accepting AI education/training programs as valid systems
+  - Broken URLs (404) were passing triage and generating empty fichas
+  - Articles about GobLab UAI's own Repositorio de Algoritmos were included
+  - Google News search was not date-filtered, returning year-old results
+  - Playwright launched a new browser per URL — very slow; now uses one
+    shared async browser instance across all concurrent resolutions
+  - Too few sources: added 8 more Google News search terms, 4 more
+    institutional sources covering Laboratorio de Gobierno, Ministerio de
+    Hacienda, Ministerio de Economía, and Servicio Civil
 
 Usage:
     python3 pipeline.py
     python3 pipeline.py --max-candidates 50
     python3 pipeline.py --output mis_fichas.docx
-    python3 pipeline.py --db algorithm_database.csv   # dedup against existing DB
 """
 
 import sys
@@ -24,8 +35,9 @@ import os
 import csv
 import json
 import time
+import asyncio
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -43,24 +55,42 @@ EXTRACT_MODEL = "claude-opus-4-8"
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
 
-GOOGLE_NEWS_TERMS = [
-    "inteligencia artificial piloto Chile",
-    "IA implementación gobierno Chile",
-    "sistema IA piloto Chile",
-    "algoritmos sector público Chile",
-    "automatización decisiones gobierno Chile",
-    "machine learning sector público Chile",
-    "analítica predictiva gobierno Chile",
-    "modelos predictivos sector público Chile",
-    "licitación inteligencia artificial Chile gobierno",
-    "software IA ministerio Chile",
-    "plataforma digital gobierno Chile algoritmo",
-    "sistema predictivo servicio público Chile",
-]
+# Date filter: only return articles published in the last 12 months
+_ONE_YEAR_AGO = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-# Direct RSS feeds from Chilean news sites — entries have real article URLs
-# (no JS redirects). Sent to triage WITHOUT keyword pre-filtering so Claude
-# decides relevance, not a keyword list.
+def _news_terms_with_date():
+    """Return search terms with an after: date filter for Google News."""
+    terms = [
+        # Broad AI + public sector
+        "inteligencia artificial piloto Chile gobierno",
+        "IA implementación gobierno Chile",
+        "sistema IA piloto Chile",
+        "algoritmos sector público Chile",
+        "automatización decisiones gobierno Chile",
+        "machine learning sector público Chile",
+        "analítica predictiva gobierno Chile",
+        "modelos predictivos sector público Chile",
+        # Procurement / institutional
+        "licitación inteligencia artificial Chile gobierno",
+        "software IA ministerio Chile",
+        "plataforma digital gobierno Chile algoritmo",
+        "sistema predictivo servicio público Chile",
+        # Specific domains known to use AI
+        "reconocimiento facial Chile gobierno",
+        "IA fiscalización Chile servicio público",
+        "inteligencia artificial salud Chile ministerio",
+        "inteligencia artificial educación Chile ministerio",
+        "modelo predictivo Chile ministerio",
+        "herramienta IA institución pública Chile",
+        # English — some coverage is in English
+        "artificial intelligence Chile government public sector",
+        "machine learning Chile ministry algorithm",
+    ]
+    return [f"{t} after:{_ONE_YEAR_AGO}" for t in terms]
+
+GOOGLE_NEWS_TERMS = _news_terms_with_date()
+
+# Direct RSS feeds from Chilean news sites (no keyword filter — Claude triages all)
 DIRECT_NEWS_FEEDS = [
     {"name": "Radio U. Chile",  "url": "https://radio.uchile.cl/feed/"},
     {"name": "La Tercera",      "url": "https://www.latercera.com/rss/"},
@@ -70,24 +100,7 @@ DIRECT_NEWS_FEEDS = [
 ]
 
 INSTITUTIONAL_SOURCES = [
-    {
-        "name": "ANID — Noticias",
-        "url":  "https://www.anid.cl/noticias/",
-        "base": "https://www.anid.cl",
-        "article_only": True,
-    },
-    {
-        "name": "ANID — Búsqueda IA",
-        "url":  "https://www.anid.cl/?s=inteligencia+artificial",
-        "base": "https://www.anid.cl",
-        "article_only": True,
-    },
-    {
-        "name": "Ministerio de Ciencia — Noticias",
-        "url":  "https://www.minciencia.gob.cl/noticias/",
-        "base": "https://www.minciencia.gob.cl",
-        "article_only": True,
-    },
+    # Core government news portals
     {
         "name": "Gobierno de Chile — Noticias",
         "url":  "https://www.gob.cl/noticias/",
@@ -101,16 +114,61 @@ INSTITUTIONAL_SOURCES = [
         "article_only": True,
     },
     {
-        "name": "DIPRES — Balance de Gestión Integral",
-        "url":  "https://www.dipres.gob.cl/597/w3-propertyvalue-15160.html",
-        "base": "https://www.dipres.gob.cl",
-        "article_only": False,
+        "name": "Ministerio de Ciencia — Noticias",
+        "url":  "https://www.minciencia.gob.cl/noticias/",
+        "base": "https://www.minciencia.gob.cl",
+        "article_only": True,
+    },
+    # Research & innovation
+    {
+        "name": "ANID — Noticias",
+        "url":  "https://www.anid.cl/noticias/",
+        "base": "https://www.anid.cl",
+        "article_only": True,
+    },
+    {
+        "name": "ANID — Búsqueda IA",
+        "url":  "https://www.anid.cl/?s=inteligencia+artificial",
+        "base": "https://www.anid.cl",
+        "article_only": True,
     },
     {
         "name": "TransformacionPublica — Blog",
         "url":  "https://transformacionpublica.cl/blog/",
         "base": "https://transformacionpublica.cl",
         "article_only": True,
+    },
+    # Economic / regulatory ministries
+    {
+        "name": "Ministerio de Hacienda",
+        "url":  "https://www.hacienda.cl/noticias/",
+        "base": "https://www.hacienda.cl",
+        "article_only": True,
+    },
+    {
+        "name": "Ministerio de Economía",
+        "url":  "https://www.economia.gob.cl/noticias/",
+        "base": "https://www.economia.gob.cl",
+        "article_only": True,
+    },
+    {
+        "name": "Servicio Civil",
+        "url":  "https://www.serviciocivil.cl/noticias/",
+        "base": "https://www.serviciocivil.cl",
+        "article_only": True,
+    },
+    # Innovation lab & planning
+    {
+        "name": "Laboratorio de Gobierno",
+        "url":  "https://lab.gob.cl/soluciones/",
+        "base": "https://lab.gob.cl",
+        "article_only": True,
+    },
+    {
+        "name": "DIPRES — Balance de Gestión Integral",
+        "url":  "https://www.dipres.gob.cl/597/w3-propertyvalue-15160.html",
+        "base": "https://www.dipres.gob.cl",
+        "article_only": False,
     },
 ]
 
@@ -125,17 +183,18 @@ SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com
 
 # ── EXISTING DATABASE ─────────────────────────────────────────────────────────
 
-# The CSV exported from the GobLab Google Sheet has two header rows:
-#   Row 1 — merged group labels (ESTADO, INFORMACIÓN DEL ALGORITMO, …)
-#   Row 2 — actual column names (Título, Institución Pública, …)
-# We skip row 1 and use row 2 as the real headers.
 DEFAULT_DB_PATH = Path(
     "given materials/Organización Casos Repositorio - Proyectos Repositorio.csv"
 )
 
 
 def load_algorithm_database(csv_path: str) -> list[dict]:
-    """Load existing algorithms from the GobLab repository CSV."""
+    """Load existing algorithms from the GobLab repository CSV.
+
+    The exported Google Sheet has two header rows:
+      Row 1 — merged group labels (skip)
+      Row 2 — actual column names (Título, Institución Pública, …)
+    """
     path = Path(csv_path)
     if not path.exists():
         print(f"  WARNING: Database file not found: {csv_path}")
@@ -145,7 +204,7 @@ def load_algorithm_database(csv_path: str) -> list[dict]:
             reader  = csv.reader(f)
             next(reader)            # skip group-label row
             headers = next(reader)  # actual column names
-            rows = []
+            rows    = []
             for row in reader:
                 if row:
                     padded = row + [""] * max(0, len(headers) - len(row))
@@ -164,7 +223,6 @@ def build_db_summary(existing: list[dict]) -> str:
     lines = []
     for row in existing:
         name = row.get("Título", "").strip().lstrip("-").strip()
-        # Institution field may contain multiple lines, each starting with '-'
         inst_raw = row.get("Institución Pública", "").strip()
         inst = inst_raw.split("\n")[0].lstrip("-").strip()
         if name:
@@ -203,7 +261,7 @@ def scrape_google_news(term: str) -> list[dict]:
 
 
 def scrape_direct_feeds() -> list[dict]:
-    """Fetch all entries from direct Chilean news RSS feeds — no keyword filter."""
+    """Fetch all entries from direct Chilean news RSS feeds — Claude triages everything."""
     results = []
     for feed_info in DIRECT_NEWS_FEEDS:
         try:
@@ -213,9 +271,7 @@ def scrape_direct_feeds() -> list[dict]:
             count = 0
             for entry in feed.entries:
                 link = entry.get("link", "")
-                if not link.startswith("http"):
-                    continue
-                if "news.google.com" in link:
+                if not link.startswith("http") or "news.google.com" in link:
                     continue
                 results.append({
                     "url":    link,
@@ -287,72 +343,77 @@ def scrape_institutional(source) -> list[dict]:
 
 # ── PHASE 1b: RESOLVE GOOGLE NEWS REDIRECTS ───────────────────────────────────
 
-def resolve_gnews_urls(gnews_candidates: list[dict], concurrency: int = 4) -> list[dict]:
+def resolve_gnews_urls(gnews_candidates: list[dict], concurrency: int = 8) -> list[dict]:
     """
-    Use Playwright (headless Chromium) to follow Google News JavaScript redirects
-    and return only candidates whose real article URL was successfully resolved.
+    Use async Playwright with one shared browser to follow Google News JS
+    redirects concurrently. Significantly faster than spawning one browser
+    per URL (previous approach).
     """
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
         print("  WARNING: playwright not installed — skipping Google News URL resolution")
         print("  Run: pip3 install playwright && playwright install chromium")
         return []
 
-    print(f"\n  Resolviendo {len(gnews_candidates)} URLs de Google News con Playwright...")
-    resolved = []
-    done     = 0
+    print(f"\n  Resolviendo {len(gnews_candidates)} URLs de Google News...")
 
-    # Each thread needs its own playwright + browser — the sync API uses
-    # greenlets and cannot share browser objects across OS threads.
-    def resolve_one(candidate):
-        url = candidate["url"]
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page    = browser.new_page()
-                page.goto(url, wait_until="commit", timeout=15000)
-                page.wait_for_timeout(3000)
-                final = page.url
-                browser.close()
-            if "news.google.com" not in final:
-                return {**candidate, "url": final}
-            return None
-        except Exception:
-            return None
+    async def _resolve_all(candidates):
+        sem = asyncio.Semaphore(concurrency)
 
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        future_to_cand = {pool.submit(resolve_one, c): c for c in gnews_candidates}
-        for future in as_completed(future_to_cand):
-            result = future.result()
-            done  += 1
-            if result:
-                resolved.append(result)
-                status = f"✓ → {result['url'][:65]}"
-            else:
-                status = "✗ (no resuelto)"
-            print(f"  [{done:>3}/{len(gnews_candidates)}] {status}")
+        async def resolve_one(candidate):
+            async with sem:
+                url = candidate["url"]
+                try:
+                    page = await browser.new_page()
+                    await page.goto(url, wait_until="commit", timeout=15000)
+                    await asyncio.sleep(2)
+                    final = page.url
+                    await page.close()
+                    if "news.google.com" not in final:
+                        return {**candidate, "url": final}
+                    return None
+                except Exception:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    return None
 
-    print(f"  → {len(resolved)} URLs de Google News resueltas\n")
+        async with async_playwright() as p:
+            browser  = await p.chromium.launch(headless=True)
+            results  = await asyncio.gather(*[resolve_one(c) for c in candidates])
+            await browser.close()
+
+        return [r for r in results if r]
+
+    resolved = asyncio.run(_resolve_all(gnews_candidates))
+
+    success = len(resolved)
+    total   = len(gnews_candidates)
+    print(f"  → {success}/{total} URLs de Google News resueltas\n")
     return resolved
 
 
 def phase_scrape(max_candidates: int | None) -> list[dict]:
     print("\n" + "═" * 65)
     print("  FASE 1 — SCRAPING")
+    print(f"  Buscando artículos desde {_ONE_YEAR_AGO} en adelante")
     print("═" * 65)
 
     all_candidates = []
 
-    print("\n  [Google News RSS — 12 términos de búsqueda]")
+    print(f"\n  [Google News RSS — {len(GOOGLE_NEWS_TERMS)} términos de búsqueda]")
     gnews_raw = []
     for term in GOOGLE_NEWS_TERMS:
         results = scrape_google_news(term)
-        print(f"    \"{term}\": {len(results)} artículos")
+        # strip the "after:YYYY-MM-DD" from the display label
+        display = term.split(" after:")[0]
+        print(f"    \"{display}\": {len(results)} artículos")
         gnews_raw.extend(results)
 
     # Dedup Google News candidates before resolving (saves browser calls)
-    seen_gnews = set()
+    seen_gnews  = set()
     gnews_unique = []
     for c in gnews_raw:
         if c["url"] not in seen_gnews:
@@ -360,7 +421,6 @@ def phase_scrape(max_candidates: int | None) -> list[dict]:
             gnews_unique.append(c)
     print(f"  → {len(gnews_unique)} URLs únicas de Google News")
 
-    # Resolve all Google News redirect URLs to real article URLs
     resolved = resolve_gnews_urls(gnews_unique)
     all_candidates.extend(resolved)
 
@@ -393,7 +453,8 @@ def phase_scrape(max_candidates: int | None) -> list[dict]:
 # ── PHASE 2: TRIAGE ───────────────────────────────────────────────────────────
 
 TRIAGE_SYSTEM_BASE = """\
-Eres un asistente de investigación para el Repositorio de Algoritmos Públicos de GobLab UAI (Chile).
+Eres un asistente de investigación para el Repositorio de Algoritmos Públicos de GobLab UAI \
+(Universidad Adolfo Ibáñez, Chile).
 Evalúa si un artículo describe un sistema de IA o algoritmo ESPECÍFICO que está siendo usado \
 u oficialmente planificado por una institución pública chilena.
 
@@ -409,18 +470,22 @@ Responde ÚNICAMENTE con JSON válido con estas claves exactas:
 
 relevant = true SOLO si se cumplen TODOS estos criterios:
 - Describe un sistema, herramienta, o proyecto ESPECÍFICO con nombre o función identificable
+  (no tendencias generales de IA, no estudios, no rankings, no conferencias)
 - Involucra al sector público chileno (gobierno, ministerios, servicios públicos, municipios)
 - El sistema está activo, en piloto oficial, o en planificación formal anunciada
-- El artículo tiene contenido textual sustancial para evaluar el sistema
+- El artículo tiene suficiente contenido textual para evaluar el sistema
 
-relevant = false si:
-- Es sobre tendencias generales de IA sin sistema específico
-- Involucra solo sector privado sin contrato o uso público
+relevant = false en CUALQUIERA de estos casos:
+- El artículo habla de un programa de formación, curso, taller, o educación sobre IA
+  (ej. "X institución capacita a funcionarios en IA" — eso es educación, no un sistema)
+- El artículo es sobre el Repositorio de Algoritmos Públicos de GobLab UAI en sí mismo
+- La URL retorna un error 404 o el contenido dice "página no encontrada"
+- Involucra solo sector privado sin contrato/uso/mandato público
 - Habla de otro país y no del sector público de Chile específicamente
+- La mención de Chile o de IA es incidental o de relleno
 - Es principalmente video, ranking, opinión, o entretenimiento sin descripción técnica
-- La mención de Chile o de IA es incidental
 
-is_duplicate = true si el sistema identificado ya aparece en la lista de sistemas existentes.\
+is_duplicate = true si el sistema ya aparece en la lista de sistemas existentes.\
 """
 
 
@@ -428,10 +493,13 @@ def triage_one(candidate: dict, client: anthropic.Anthropic, db_suffix: str) -> 
     url  = candidate["url"]
     text = fetch_url(url)
 
-    if len(text) < 300 or text.startswith("[ERROR"):
+    # Treat 404s and very short pages as not relevant without calling Claude
+    if (len(text) < 300 or text.startswith("[ERROR") or
+            any(p in text.lower() for p in ["página no encontrada", "page not found",
+                                            "404 not found", "error 404"])):
         return {
             "url": url, "relevant": False,
-            "reason": "Contenido insuficiente o error al obtener la página",
+            "reason": "Contenido insuficiente, error al obtener la página, o 404",
             "system_name": None, "institution": None,
             "is_duplicate": False, "duplicate_of": None,
             "orig_source": candidate.get("source", ""),
@@ -487,7 +555,7 @@ def phase_triage(candidates: list[dict], client: anthropic.Anthropic, db_suffix:
             done        += 1
 
             if result.get("is_duplicate"):
-                mark = "⟳"
+                mark  = "⟳"
                 label = f"DUPLICADO de: {result.get('duplicate_of') or '?'}"
             elif result.get("relevant"):
                 mark  = "✓"
@@ -654,8 +722,7 @@ def main():
     parser.add_argument("--output", "-o", default=None,
                         help="Output .docx filename (saved in fichas_output/)")
     parser.add_argument("--db", default=None,
-                        help="CSV file with existing algorithms for deduplication "
-                             "(e.g. algorithm_database.csv)")
+                        help="CSV with existing algorithms for deduplication")
     args = parser.parse_args()
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -674,8 +741,7 @@ def main():
     print(f"  Salida: fichas_output/{out_name}")
     print("═" * 65)
 
-    # Load existing algorithm database for deduplication.
-    # Uses --db if provided, otherwise checks the default path automatically.
+    # Auto-detect the database CSV if not specified via --db
     db_suffix = ""
     db_path   = args.db or (str(DEFAULT_DB_PATH) if DEFAULT_DB_PATH.exists() else None)
     if db_path:
