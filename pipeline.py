@@ -125,16 +125,31 @@ SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com
 
 # ── EXISTING DATABASE ─────────────────────────────────────────────────────────
 
+# The CSV exported from the GobLab Google Sheet has two header rows:
+#   Row 1 — merged group labels (ESTADO, INFORMACIÓN DEL ALGORITMO, …)
+#   Row 2 — actual column names (Título, Institución Pública, …)
+# We skip row 1 and use row 2 as the real headers.
+DEFAULT_DB_PATH = Path(
+    "given materials/Organización Casos Repositorio - Proyectos Repositorio.csv"
+)
+
+
 def load_algorithm_database(csv_path: str) -> list[dict]:
-    """Load existing algorithms from CSV to use for deduplication during triage."""
+    """Load existing algorithms from the GobLab repository CSV."""
     path = Path(csv_path)
     if not path.exists():
         print(f"  WARNING: Database file not found: {csv_path}")
         return []
     try:
         with open(path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+            reader  = csv.reader(f)
+            next(reader)            # skip group-label row
+            headers = next(reader)  # actual column names
+            rows = []
+            for row in reader:
+                if row:
+                    padded = row + [""] * max(0, len(headers) - len(row))
+                    rows.append(dict(zip(headers, padded)))
         print(f"  Base de datos cargada: {len(rows)} algoritmos existentes")
         return rows
     except Exception as e:
@@ -143,24 +158,23 @@ def load_algorithm_database(csv_path: str) -> list[dict]:
 
 
 def build_db_summary(existing: list[dict]) -> str:
-    """Format the existing algorithm list for inclusion in prompts."""
+    """Format the existing algorithm list for inclusion in the triage prompt."""
     if not existing:
         return ""
     lines = []
     for row in existing:
-        # Try common column names — adjust if the user's CSV uses different headers
-        name = (row.get("Nombre") or row.get("nombre") or
-                row.get("Sistema") or row.get("sistema") or
-                row.get("Name") or "").strip()
-        inst = (row.get("Institución") or row.get("institucion") or
-                row.get("Institucion") or row.get("Institution") or "").strip()
+        name = row.get("Título", "").strip().lstrip("-").strip()
+        # Institution field may contain multiple lines, each starting with '-'
+        inst_raw = row.get("Institución Pública", "").strip()
+        inst = inst_raw.split("\n")[0].lstrip("-").strip()
         if name:
             lines.append(f"- {name}" + (f" ({inst})" if inst else ""))
     if not lines:
         return ""
     return (
-        "\n\nSISTEMAS YA EN LA BASE DE DATOS (marcar como duplicado si el artículo "
-        "describe alguno de estos — no generar nueva ficha):\n" + "\n".join(lines)
+        "\n\nSISTEMAS YA EN LA BASE DE DATOS — marca is_duplicate=true si el artículo "
+        "trata sobre alguno de estos (misma institución + mismo sistema):\n"
+        + "\n".join(lines)
     )
 
 
@@ -660,14 +674,16 @@ def main():
     print(f"  Salida: fichas_output/{out_name}")
     print("═" * 65)
 
-    # Load existing algorithm database if provided
+    # Load existing algorithm database for deduplication.
+    # Uses --db if provided, otherwise checks the default path automatically.
     db_suffix = ""
-    if args.db:
-        print(f"\n  [Base de datos: {args.db}]")
-        existing = load_algorithm_database(args.db)
+    db_path   = args.db or (str(DEFAULT_DB_PATH) if DEFAULT_DB_PATH.exists() else None)
+    if db_path:
+        print(f"\n  [Base de datos: {db_path}]")
+        existing  = load_algorithm_database(db_path)
         db_suffix = build_db_summary(existing)
     else:
-        print("\n  (Sin base de datos — usar --db archivo.csv para deduplicación)")
+        print("\n  (Sin base de datos — colocar CSV en 'given materials/' para deduplicación)")
 
     t0 = time.time()
 
