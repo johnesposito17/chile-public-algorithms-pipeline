@@ -46,7 +46,6 @@ DIRECT_NEWS_FEEDS = [
     {"name": "Radio U. Chile",  "url": "https://radio.uchile.cl/feed/"},
     {"name": "La Tercera",      "url": "https://www.latercera.com/rss/"},
     {"name": "CIPER Chile",     "url": "https://www.ciperchile.cl/feed/"},
-    {"name": "FayerWayer",      "url": "https://www.fayerwayer.com/feed/"},
     {"name": "The Clinic",      "url": "https://www.theclinic.cl/feed/"},
     {"name": "ANID RSS",        "url": "https://anid.cl/feed/"},
 ]
@@ -105,7 +104,7 @@ INSTITUTIONAL_SOURCES = [
     },
     {
         "name": "División Gobierno Digital",
-        "url":  "https://digital.gob.cl/noticias/",
+        "url":  "https://digital.gob.cl/media/noticias/",
         "base": "https://digital.gob.cl",
         "article_only": True,
     },
