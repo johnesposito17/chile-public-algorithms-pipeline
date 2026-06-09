@@ -2,22 +2,26 @@
 """
 GobLab Pipeline — End-to-end automated system
 
-Phase 1  SCRAPE   — Direct Chilean news RSS feeds (keyword-filtered) +
-                    institutional sites → candidate URLs with readable content
+Phase 1  SCRAPE   — Google News RSS (12 terms) + direct Chilean news RSS feeds +
+                    institutional sites → candidate URLs
+Phase 1b RESOLVE  — Playwright follows Google News JavaScript redirects to get
+                    the real article URL for every candidate
 Phase 2  TRIAGE   — Claude reads each article's full text; keeps only specific
-                    Chilean public-sector AI/algorithmic systems
-Phase 3  GROUP    — Clusters URLs that describe the same project so that
-                    multiple sources become multiple APA citations in one ficha
+                    Chilean public-sector AI/algorithmic systems; checks against
+                    the existing algorithm database to avoid duplicates
+Phase 3  GROUP    — Clusters URLs that describe the same project
 Phase 4  GENERATE — Produces one Word ficha per project cluster
 
 Usage:
     python3 pipeline.py
-    python3 pipeline.py --max-candidates 50   # smaller run for testing
+    python3 pipeline.py --max-candidates 50
     python3 pipeline.py --output mis_fichas.docx
+    python3 pipeline.py --db algorithm_database.csv   # dedup against existing DB
 """
 
 import sys
 import os
+import csv
 import json
 import time
 import argparse
@@ -34,47 +38,35 @@ from generate_ficha import fetch_url, extract_ficha_fields, build_docx, OUTPUT_D
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 
-TRIAGE_MODEL  = "claude-haiku-4-5-20251001"  # fast + cheap for yes/no filtering
-EXTRACT_MODEL = "claude-opus-4-8"            # thorough for final ficha extraction
+TRIAGE_MODEL  = "claude-haiku-4-5-20251001"
+EXTRACT_MODEL = "claude-opus-4-8"
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
 
-# Direct RSS feeds from Chilean news outlets whose entries have real article
-# URLs (not Google News JavaScript-redirect URLs). This lets us download and
-# read the full article text for every candidate before sending it to Claude.
+GOOGLE_NEWS_TERMS = [
+    "inteligencia artificial piloto Chile",
+    "IA implementación gobierno Chile",
+    "sistema IA piloto Chile",
+    "algoritmos sector público Chile",
+    "automatización decisiones gobierno Chile",
+    "machine learning sector público Chile",
+    "analítica predictiva gobierno Chile",
+    "modelos predictivos sector público Chile",
+    "licitación inteligencia artificial Chile gobierno",
+    "software IA ministerio Chile",
+    "plataforma digital gobierno Chile algoritmo",
+    "sistema predictivo servicio público Chile",
+]
+
+# Direct RSS feeds from Chilean news sites — entries have real article URLs
+# (no JS redirects). Sent to triage WITHOUT keyword pre-filtering so Claude
+# decides relevance, not a keyword list.
 DIRECT_NEWS_FEEDS = [
     {"name": "Radio U. Chile",  "url": "https://radio.uchile.cl/feed/"},
     {"name": "La Tercera",      "url": "https://www.latercera.com/rss/"},
     {"name": "CIPER Chile",     "url": "https://www.ciperchile.cl/feed/"},
     {"name": "The Clinic",      "url": "https://www.theclinic.cl/feed/"},
     {"name": "ANID RSS",        "url": "https://anid.cl/feed/"},
-]
-
-# Keywords for cheap pre-filtering of RSS entries before Claude triage.
-# At least one must appear (case-insensitive) in the article title or description.
-AI_KEYWORDS = [
-    "inteligencia artificial",
-    "algoritmo",
-    "machine learning",
-    "aprendizaje automático",
-    "aprendizaje automatico",
-    "automatización",
-    "automatizacion",
-    "modelo predictivo",
-    "analítica predictiva",
-    "analitica predictiva",
-    "deep learning",
-    "reconocimiento facial",
-    "procesamiento de lenguaje natural",
-    "chatbot",
-    "gobierno digital",
-    "datos abiertos",
-    "sistema de decisión",
-    "sistema de decision",
-    "predicción",
-    "prediccion",
-    "fiscalización digital",
-    "fiscalizacion digital",
 ]
 
 INSTITUTIONAL_SOURCES = [
@@ -122,7 +114,6 @@ INSTITUTIONAL_SOURCES = [
     },
 ]
 
-# Realistic browser UA passes CloudFront and most CDN bot-checks
 HEADERS = {
     "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -132,43 +123,93 @@ HEADERS = {
 SKIP_EXTENSIONS = {".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".xml"}
 SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com", "youtube.com", "youtu.be"}
 
+# ── EXISTING DATABASE ─────────────────────────────────────────────────────────
+
+def load_algorithm_database(csv_path: str) -> list[dict]:
+    """Load existing algorithms from CSV to use for deduplication during triage."""
+    path = Path(csv_path)
+    if not path.exists():
+        print(f"  WARNING: Database file not found: {csv_path}")
+        return []
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        print(f"  Base de datos cargada: {len(rows)} algoritmos existentes")
+        return rows
+    except Exception as e:
+        print(f"  WARNING: Could not read database CSV: {e}")
+        return []
+
+
+def build_db_summary(existing: list[dict]) -> str:
+    """Format the existing algorithm list for inclusion in prompts."""
+    if not existing:
+        return ""
+    lines = []
+    for row in existing:
+        # Try common column names — adjust if the user's CSV uses different headers
+        name = (row.get("Nombre") or row.get("nombre") or
+                row.get("Sistema") or row.get("sistema") or
+                row.get("Name") or "").strip()
+        inst = (row.get("Institución") or row.get("institucion") or
+                row.get("Institucion") or row.get("Institution") or "").strip()
+        if name:
+            lines.append(f"- {name}" + (f" ({inst})" if inst else ""))
+    if not lines:
+        return ""
+    return (
+        "\n\nSISTEMAS YA EN LA BASE DE DATOS (marcar como duplicado si el artículo "
+        "describe alguno de estos — no generar nueva ficha):\n" + "\n".join(lines)
+    )
+
+
 # ── PHASE 1: SCRAPE ───────────────────────────────────────────────────────────
 
-def matches_ai_keywords(text: str) -> bool:
-    """Return True if text contains at least one AI-related keyword."""
-    t = text.lower()
-    return any(kw in t for kw in AI_KEYWORDS)
+def scrape_google_news(term: str) -> list[dict]:
+    q   = requests.utils.quote(term)
+    url = f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=CL&ceid=CL:es-419"
+    try:
+        r    = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        feed = feedparser.parse(r.content)
+        results = []
+        for entry in feed.entries:
+            link = entry.get("link", "")
+            if link.startswith("http"):
+                results.append({
+                    "url":    link,
+                    "title":  entry.get("title", ""),
+                    "source": f'Google News: "{term}"',
+                })
+        return results
+    except Exception as e:
+        print(f"    ERROR RSS '{term}': {e}")
+        return []
 
 
-def scrape_direct_feeds():
-    """Fetch Chilean news RSS feeds and pre-filter entries by AI keywords."""
+def scrape_direct_feeds() -> list[dict]:
+    """Fetch all entries from direct Chilean news RSS feeds — no keyword filter."""
     results = []
     for feed_info in DIRECT_NEWS_FEEDS:
         try:
-            r = requests.get(feed_info["url"], headers=HEADERS, timeout=15)
+            r    = requests.get(feed_info["url"], headers=HEADERS, timeout=15)
             r.raise_for_status()
-            feed  = feedparser.parse(r.content)
+            feed = feedparser.parse(r.content)
             count = 0
             for entry in feed.entries:
-                link    = entry.get("link", "")
-                title   = entry.get("title", "")
-                summary = entry.get("summary", "") or entry.get("description", "")
-
+                link = entry.get("link", "")
                 if not link.startswith("http"):
                     continue
                 if "news.google.com" in link:
-                    continue  # skip any accidental Google News redirect URLs
-
-                if not matches_ai_keywords(title + " " + summary):
                     continue
-
                 results.append({
                     "url":    link,
-                    "title":  title,
+                    "title":  entry.get("title", ""),
                     "source": f"RSS: {feed_info['name']}",
                 })
                 count += 1
-            print(f"    {feed_info['name']}: {count} artículos con palabras clave IA")
+            print(f"    {feed_info['name']}: {count} artículos")
         except Exception as e:
             print(f"    ERROR {feed_info['name']}: {e}")
     return results
@@ -190,10 +231,6 @@ def resolve_href(href, base):
 
 
 def is_article_link(url):
-    """
-    Heuristic: news article URLs have long, word-rich slugs.
-    Navigation pages have short slugs like /convenios/ or /concursos/
-    """
     from urllib.parse import urlparse
     path  = urlparse(url).path.rstrip("/")
     if not path:
@@ -203,7 +240,7 @@ def is_article_link(url):
     return len(words) >= 5
 
 
-def scrape_institutional(source):
+def scrape_institutional(source) -> list[dict]:
     try:
         r = requests.get(source["url"], headers=HEADERS, timeout=20, allow_redirects=True)
         r.raise_for_status()
@@ -234,42 +271,114 @@ def scrape_institutional(source):
         return []
 
 
-def phase_scrape(max_candidates):
+# ── PHASE 1b: RESOLVE GOOGLE NEWS REDIRECTS ───────────────────────────────────
+
+def resolve_gnews_urls(gnews_candidates: list[dict], concurrency: int = 4) -> list[dict]:
+    """
+    Use Playwright (headless Chromium) to follow Google News JavaScript redirects
+    and return only candidates whose real article URL was successfully resolved.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  WARNING: playwright not installed — skipping Google News URL resolution")
+        print("  Run: pip3 install playwright && playwright install chromium")
+        return []
+
+    print(f"\n  Resolviendo {len(gnews_candidates)} URLs de Google News con Playwright...")
+    resolved = []
+    done     = 0
+
+    # Each thread needs its own playwright + browser — the sync API uses
+    # greenlets and cannot share browser objects across OS threads.
+    def resolve_one(candidate):
+        url = candidate["url"]
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page    = browser.new_page()
+                page.goto(url, wait_until="commit", timeout=15000)
+                page.wait_for_timeout(3000)
+                final = page.url
+                browser.close()
+            if "news.google.com" not in final:
+                return {**candidate, "url": final}
+            return None
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        future_to_cand = {pool.submit(resolve_one, c): c for c in gnews_candidates}
+        for future in as_completed(future_to_cand):
+            result = future.result()
+            done  += 1
+            if result:
+                resolved.append(result)
+                status = f"✓ → {result['url'][:65]}"
+            else:
+                status = "✗ (no resuelto)"
+            print(f"  [{done:>3}/{len(gnews_candidates)}] {status}")
+
+    print(f"  → {len(resolved)} URLs de Google News resueltas\n")
+    return resolved
+
+
+def phase_scrape(max_candidates: int | None) -> list[dict]:
     print("\n" + "═" * 65)
     print("  FASE 1 — SCRAPING")
     print("═" * 65)
 
-    candidates = []
+    all_candidates = []
 
-    print("\n  [Feeds RSS directos — artículos con contenido descargable]")
-    candidates.extend(scrape_direct_feeds())
+    print("\n  [Google News RSS — 12 términos de búsqueda]")
+    gnews_raw = []
+    for term in GOOGLE_NEWS_TERMS:
+        results = scrape_google_news(term)
+        print(f"    \"{term}\": {len(results)} artículos")
+        gnews_raw.extend(results)
+
+    # Dedup Google News candidates before resolving (saves browser calls)
+    seen_gnews = set()
+    gnews_unique = []
+    for c in gnews_raw:
+        if c["url"] not in seen_gnews:
+            seen_gnews.add(c["url"])
+            gnews_unique.append(c)
+    print(f"  → {len(gnews_unique)} URLs únicas de Google News")
+
+    # Resolve all Google News redirect URLs to real article URLs
+    resolved = resolve_gnews_urls(gnews_unique)
+    all_candidates.extend(resolved)
+
+    print("  [Feeds RSS directos]")
+    all_candidates.extend(scrape_direct_feeds())
 
     print("\n  [Sitios institucionales]")
     for source in INSTITUTIONAL_SOURCES:
         results = scrape_institutional(source)
         print(f"    {source['name']}: {len(results)} links")
-        candidates.extend(results)
+        all_candidates.extend(results)
 
-    # URL-level dedup
+    # Global URL-level dedup
     seen   = set()
     unique = []
-    for c in candidates:
+    for c in all_candidates:
         if c["url"] not in seen:
             seen.add(c["url"])
             unique.append(c)
 
-    print(f"\n  → {len(unique)} URLs únicas encontradas")
+    print(f"\n  → {len(unique)} URLs únicas en total")
 
     if max_candidates and len(unique) > max_candidates:
         unique = unique[:max_candidates]
-        print(f"  → Limitado a {max_candidates} para esta ejecución (--max-candidates)")
+        print(f"  → Limitado a {max_candidates} (--max-candidates)")
 
     return unique
 
 
 # ── PHASE 2: TRIAGE ───────────────────────────────────────────────────────────
 
-TRIAGE_SYSTEM = """\
+TRIAGE_SYSTEM_BASE = """\
 Eres un asistente de investigación para el Repositorio de Algoritmos Públicos de GobLab UAI (Chile).
 Evalúa si un artículo describe un sistema de IA o algoritmo ESPECÍFICO que está siendo usado \
 u oficialmente planificado por una institución pública chilena.
@@ -279,25 +388,29 @@ Responde ÚNICAMENTE con JSON válido con estas claves exactas:
   "relevant": true o false,
   "reason": "una oración explicando la decisión",
   "system_name": "nombre del sistema/proyecto, o null",
-  "institution": "nombre de la institución pública chilena, o null"
+  "institution": "nombre de la institución pública chilena, o null",
+  "is_duplicate": true o false,
+  "duplicate_of": "nombre del sistema existente en la base de datos, o null"
 }
 
 relevant = true SOLO si se cumplen TODOS estos criterios:
-- Describe un sistema, herramienta, o proyecto ESPECÍFICO (no tendencias generales de IA)
+- Describe un sistema, herramienta, o proyecto ESPECÍFICO con nombre o función identificable
 - Involucra al sector público chileno (gobierno, ministerios, servicios públicos, municipios)
-- El sistema está activo, en piloto oficial, o en planificación formal
-- El artículo tiene contenido textual sustancial (no es principalmente video o multimedia)
+- El sistema está activo, en piloto oficial, o en planificación formal anunciada
+- El artículo tiene contenido textual sustancial para evaluar el sistema
 
 relevant = false si:
 - Es sobre tendencias generales de IA sin sistema específico
 - Involucra solo sector privado sin contrato o uso público
 - Habla de otro país y no del sector público de Chile específicamente
-- Es principalmente un video, ranking, opinión, o entretenimiento
-- La mención de Chile o de IA es incidental o de relleno\
+- Es principalmente video, ranking, opinión, o entretenimiento sin descripción técnica
+- La mención de Chile o de IA es incidental
+
+is_duplicate = true si el sistema identificado ya aparece en la lista de sistemas existentes.\
 """
 
 
-def triage_one(candidate, client):
+def triage_one(candidate: dict, client: anthropic.Anthropic, db_suffix: str) -> dict:
     url  = candidate["url"]
     text = fetch_url(url)
 
@@ -306,16 +419,18 @@ def triage_one(candidate, client):
             "url": url, "relevant": False,
             "reason": "Contenido insuficiente o error al obtener la página",
             "system_name": None, "institution": None,
+            "is_duplicate": False, "duplicate_of": None,
             "orig_source": candidate.get("source", ""),
         }
 
-    content = f"URL: {url}\n\nContenido:\n{text[:4000]}"
+    system_prompt = TRIAGE_SYSTEM_BASE + db_suffix
+    content       = f"URL: {url}\n\nContenido:\n{text[:4000]}"
 
     try:
         resp = client.messages.create(
             model=TRIAGE_MODEL,
-            max_tokens=300,
-            system=TRIAGE_SYSTEM,
+            max_tokens=400,
+            system=system_prompt,
             messages=[{"role": "user", "content": content}],
         )
         raw = resp.content[0].text.strip()
@@ -325,41 +440,56 @@ def triage_one(candidate, client):
                 raw = raw[4:]
         result = json.loads(raw)
     except Exception as e:
-        result = {"relevant": False, "reason": f"Error en triage: {e}", "system_name": None, "institution": None}
+        result = {
+            "relevant": False, "reason": f"Error en triage: {e}",
+            "system_name": None, "institution": None,
+            "is_duplicate": False, "duplicate_of": None,
+        }
 
     result["url"]         = url
     result["orig_source"] = candidate.get("source", "")
     return result
 
 
-def phase_triage(candidates, client):
+def phase_triage(candidates: list[dict], client: anthropic.Anthropic, db_suffix: str) -> list[dict]:
     print("\n" + "═" * 65)
     print("  FASE 2 — TRIAGE")
     print(f"  Claude ({TRIAGE_MODEL}) lee el texto completo de cada artículo")
     print("═" * 65)
-    print(f"\n  Analizando {len(candidates)} URLs... (esto puede tardar varios minutos)\n")
+    print(f"\n  Analizando {len(candidates)} URLs...\n")
 
     results = [None] * len(candidates)
     done    = 0
 
-    # 6 concurrent workers — polite to both sites and the API
     with ThreadPoolExecutor(max_workers=6) as pool:
-        future_to_idx = {pool.submit(triage_one, c, client): i for i, c in enumerate(candidates)}
+        future_to_idx = {
+            pool.submit(triage_one, c, client, db_suffix): i
+            for i, c in enumerate(candidates)
+        }
         for future in as_completed(future_to_idx):
             idx          = future_to_idx[future]
             result       = future.result()
             results[idx] = result
             done        += 1
 
-            mark  = "✓" if result.get("relevant") else "✗"
-            label = f"{result.get('system_name') or '—'} | {result.get('institution') or '—'}"
-            short = result["url"][:65]
-            print(f"  [{done:>3}/{len(candidates)}] {mark}  {short}")
-            if result.get("relevant"):
+            if result.get("is_duplicate"):
+                mark = "⟳"
+                label = f"DUPLICADO de: {result.get('duplicate_of') or '?'}"
+            elif result.get("relevant"):
+                mark  = "✓"
+                label = f"{result.get('system_name') or '—'} | {result.get('institution') or '—'}"
+            else:
+                mark  = "✗"
+                label = result.get("reason", "")[:60]
+
+            print(f"  [{done:>3}/{len(candidates)}] {mark}  {result['url'][:60]}")
+            if result.get("relevant") or result.get("is_duplicate"):
                 print(f"             → {label}")
 
-    relevant = [r for r in results if r and r.get("relevant")]
-    print(f"\n  → {len(relevant)} relevantes de {len(candidates)} analizadas")
+    relevant = [r for r in results if r and r.get("relevant") and not r.get("is_duplicate")]
+    dupes    = [r for r in results if r and r.get("is_duplicate")]
+
+    print(f"\n  → {len(relevant)} relevantes | {len(dupes)} duplicados descartados")
     return relevant
 
 
@@ -390,7 +520,7 @@ Reglas:
 """
 
 
-def phase_group(relevant, client):
+def phase_group(relevant: list[dict], client: anthropic.Anthropic) -> list[list[dict]]:
     print("\n" + "═" * 65)
     print("  FASE 3 — AGRUPACIÓN POR PROYECTO")
     print("═" * 65)
@@ -439,7 +569,7 @@ def phase_group(relevant, client):
                 groups.append(group)
 
     except Exception as e:
-        print(f"  ERROR al agrupar: {e} — cada URL tratada como proyecto independiente")
+        print(f"  ERROR al agrupar: {e} — cada URL como proyecto independiente")
         groups = []
         for r in relevant:
             item = dict(r)
@@ -460,7 +590,7 @@ def phase_group(relevant, client):
 
 # ── PHASE 4: GENERATE FICHAS ──────────────────────────────────────────────────
 
-def phase_generate(groups, client, output_path):
+def phase_generate(groups: list[list[dict]], client: anthropic.Anthropic, output_path: Path):
     print("\n" + "═" * 65)
     print("  FASE 4 — GENERACIÓN DE FICHAS")
     print(f"  Modelo: {EXTRACT_MODEL}")
@@ -483,7 +613,7 @@ def phase_generate(groups, client, output_path):
                 print(f"    Poco contenido ({len(text)} chars) — omitiendo esta fuente")
 
         if not blocks:
-            print(f"    Sin contenido disponible — omitiendo ficha para este grupo")
+            print(f"    Sin contenido disponible — omitiendo ficha")
             continue
 
         print(f"    Enviando {len(blocks)} fuente(s) a Claude para extracción...")
@@ -492,8 +622,8 @@ def phase_generate(groups, client, output_path):
         source_map.append(blocks)
 
         if "_parse_error" not in ficha:
-            n_sources = len(ficha.get("fuentes_apa") or [])
-            print(f"    → {ficha.get('nombre', '?')} | {ficha.get('institucion_publica', '?')} | {n_sources} cita(s) APA")
+            n = len(ficha.get("fuentes_apa") or [])
+            print(f"    → {ficha.get('nombre', '?')} | {ficha.get('institucion_publica', '?')} | {n} cita(s)")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     build_docx(fichas, source_map, output_path)
@@ -506,9 +636,12 @@ def main():
         description="GobLab pipeline: scrape → triage → group → fichas"
     )
     parser.add_argument("--max-candidates", type=int, default=None,
-                        help="Cap the number of URLs sent to triage (useful for quick tests)")
+                        help="Cap URLs sent to triage (for quick tests)")
     parser.add_argument("--output", "-o", default=None,
                         help="Output .docx filename (saved in fichas_output/)")
+    parser.add_argument("--db", default=None,
+                        help="CSV file with existing algorithms for deduplication "
+                             "(e.g. algorithm_database.csv)")
     args = parser.parse_args()
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -527,10 +660,19 @@ def main():
     print(f"  Salida: fichas_output/{out_name}")
     print("═" * 65)
 
+    # Load existing algorithm database if provided
+    db_suffix = ""
+    if args.db:
+        print(f"\n  [Base de datos: {args.db}]")
+        existing = load_algorithm_database(args.db)
+        db_suffix = build_db_summary(existing)
+    else:
+        print("\n  (Sin base de datos — usar --db archivo.csv para deduplicación)")
+
     t0 = time.time()
 
     candidates = phase_scrape(args.max_candidates)
-    relevant   = phase_triage(candidates, client)
+    relevant   = phase_triage(candidates, client, db_suffix)
     groups     = phase_group(relevant, client)
 
     if not groups:
