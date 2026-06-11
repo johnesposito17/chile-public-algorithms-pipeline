@@ -139,7 +139,7 @@ Responde únicamente con el JSON estructurado solicitado."""
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1500,
+        max_tokens=4000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
@@ -153,7 +153,28 @@ Responde únicamente con el JSON estructurado solicitado."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {"_parse_error": raw}
+        # Retry once with a higher token budget and an explicit length warning
+        try:
+            retry_resp = client.messages.create(
+                model=MODEL,
+                max_tokens=6000,
+                system=SYSTEM_PROMPT,
+                messages=[
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content":
+                     "Tu respuesta anterior fue cortada. Por favor, repite el JSON completo y válido "
+                     "desde el principio, sin omitir ningún campo."},
+                ],
+            )
+            raw2 = retry_resp.content[0].text.strip()
+            if raw2.startswith("```"):
+                raw2 = raw2.split("```")[1]
+                if raw2.startswith("json"):
+                    raw2 = raw2[4:]
+            return json.loads(raw2)
+        except Exception:
+            return {"_parse_error": raw}
 
 
 # ── WORD DOCUMENT GENERATION ──────────────────────────────────────────────────
