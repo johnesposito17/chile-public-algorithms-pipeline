@@ -12,6 +12,9 @@ venv/
 fichas_output/
 candidate_urls_*.txt
 
+# URL memory — local state, varies per installation; delete to force re-processing
+seen_urls.json
+
 # macOS
 .DS_Store
 .Rhistory

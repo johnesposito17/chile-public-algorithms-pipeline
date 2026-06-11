@@ -3,7 +3,8 @@
 GobLab Pipeline — End-to-end automated system
 
 Phase 1  SCRAPE   — Google News RSS (20 terms, last 12 months) + direct Chilean
-                    news RSS feeds + expanded institutional sites → candidate URLs
+                    news RSS feeds + expanded institutional sites + MercadoPublico
+                    procurement tenders → candidate URLs
 Phase 1b RESOLVE  — Playwright (async, shared browser) follows Google News JS
                     redirects to get real article URLs — much faster than v1
 Phase 2  TRIAGE   — Claude reads each article's full text; keeps only specific
@@ -23,6 +24,15 @@ Known issues in previous runs (fixed here):
   - Too few sources: added 8 more Google News search terms, 4 more
     institutional sources covering Laboratorio de Gobierno, Ministerio de
     Hacienda, Ministerio de Economía, and Servicio Civil
+
+Optimizations:
+  - URL memory (seen_urls.json): every URL analyzed in triage is saved locally;
+    future runs skip already-processed URLs, saving both time and API cost
+  - Prompt caching: the 170-algorithm DB summary sent with every triage call is
+    marked cacheable via Anthropic's cache_control API — cuts triage cost ~90%
+  - MercadoPublico source: procurement tenders are scraped directly from
+    mercadopublico.cl using Playwright; tenders surface AI systems months before
+    journalists cover them
 
 Usage:
     python3 pipeline.py
@@ -97,6 +107,18 @@ DIRECT_NEWS_FEEDS = [
     {"name": "CIPER Chile",     "url": "https://www.ciperchile.cl/feed/"},
     {"name": "The Clinic",      "url": "https://www.theclinic.cl/feed/"},
     {"name": "ANID RSS",        "url": "https://anid.cl/feed/"},
+    # ChileCompra announces procurement tenders and licitaciones here;
+    # AI/algorithm tenders often appear months before press coverage
+    {"name": "ChileCompra",     "url": "https://www.chilecompra.cl/feed/"},
+]
+
+# MercadoPublico search terms — these drive Playwright searches on the
+# procurement portal, which surfaces actual tender documents
+MERCADOPUBLICO_TERMS = [
+    "inteligencia artificial",
+    "machine learning",
+    "algoritmo",
+    "modelo predictivo",
 ]
 
 INSTITUTIONAL_SOURCES = [
@@ -181,6 +203,25 @@ HEADERS = {
 SKIP_EXTENSIONS = {".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".xml"}
 SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com", "youtube.com", "youtu.be"}
 
+# ── URL MEMORY ────────────────────────────────────────────────────────────────
+
+SEEN_URLS_PATH = Path("seen_urls.json")
+
+
+def load_seen_urls() -> set:
+    """Load the set of URLs already processed in previous pipeline runs."""
+    if SEEN_URLS_PATH.exists():
+        with open(SEEN_URLS_PATH) as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_seen_urls(seen: set) -> None:
+    """Persist the seen-URL set so future runs can skip already-processed URLs."""
+    with open(SEEN_URLS_PATH, "w") as f:
+        json.dump(sorted(seen), f, indent=2, ensure_ascii=False)
+
+
 # ── EXISTING DATABASE ─────────────────────────────────────────────────────────
 
 DEFAULT_DB_PATH = Path(
@@ -234,6 +275,81 @@ def build_db_summary(existing: list[dict]) -> str:
         "trata sobre alguno de estos (misma institución + mismo sistema):\n"
         + "\n".join(lines)
     )
+
+
+# ── MERCADOPUBLICO SCRAPER ────────────────────────────────────────────────────
+
+def scrape_mercadopublico() -> list[dict]:
+    """
+    Search mercadopublico.cl for AI-related procurement tenders using Playwright.
+
+    The portal renders results in an iframe via JavaScript. We navigate to the
+    home page, submit each search term, then extract tender URLs from the onclick
+    handlers in the results iframe. The DetailsAcquisition pages are accessible
+    via plain HTTP so generate_ficha can fetch their full text later.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        print("  WARNING: playwright not installed — skipping MercadoPublico")
+        return []
+
+    import re as _re
+
+    async def _search_all():
+        results = []
+        seen_codes: set = set()
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page    = await browser.new_page()
+
+            for term in MERCADOPUBLICO_TERMS:
+                try:
+                    await page.goto("https://www.mercadopublico.cl/Home", timeout=30000)
+                    await asyncio.sleep(1)
+                    await page.fill("#txtBuscar", term)
+                    await page.keyboard.press("Enter")
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+                    await asyncio.sleep(3)
+
+                    # Results load inside an iframe
+                    search_frame = next(
+                        (f for f in page.frames
+                         if "BuscarLicitacion" in f.url and "?" in f.url),
+                        None,
+                    )
+                    if not search_frame:
+                        print(f"    MercadoPublico \"{term}\": no se encontró iframe de resultados")
+                        continue
+
+                    html      = await search_frame.evaluate("() => document.body.innerHTML")
+                    # Each result has: verFicha('http://www.mercadopublico.cl/…?idlicitacion=XXX')
+                    urls_found = _re.findall(
+                        r"verFicha\('(https?://www\.mercadopublico\.cl/Procurement/[^']+)'\)",
+                        html,
+                    )
+                    new_count = 0
+                    for url in urls_found:
+                        code = url.split("idlicitacion=")[-1] if "idlicitacion=" in url else url
+                        if code not in seen_codes:
+                            seen_codes.add(code)
+                            results.append({
+                                "url":    url,
+                                "title":  "",
+                                "source": f'MercadoPublico: "{term}"',
+                            })
+                            new_count += 1
+                    print(f"    MercadoPublico \"{term}\": {new_count} licitaciones")
+
+                except Exception as e:
+                    print(f"    ERROR MercadoPublico \"{term}\": {e}")
+
+            await browser.close()
+
+        return results
+
+    return asyncio.run(_search_all())
 
 
 # ── PHASE 1: SCRAPE ───────────────────────────────────────────────────────────
@@ -395,7 +511,7 @@ def resolve_gnews_urls(gnews_candidates: list[dict], concurrency: int = 8) -> li
     return resolved
 
 
-def phase_scrape(max_candidates: int | None) -> list[dict]:
+def phase_scrape(max_candidates: int | None, seen_urls: set | None = None) -> list[dict]:
     print("\n" + "═" * 65)
     print("  FASE 1 — SCRAPING")
     print(f"  Buscando artículos desde {_ONE_YEAR_AGO} en adelante")
@@ -433,6 +549,9 @@ def phase_scrape(max_candidates: int | None) -> list[dict]:
         print(f"    {source['name']}: {len(results)} links")
         all_candidates.extend(results)
 
+    print("\n  [MercadoPublico — licitaciones IA]")
+    all_candidates.extend(scrape_mercadopublico())
+
     # Global URL-level dedup
     seen   = set()
     unique = []
@@ -442,6 +561,16 @@ def phase_scrape(max_candidates: int | None) -> list[dict]:
             unique.append(c)
 
     print(f"\n  → {len(unique)} URLs únicas en total")
+
+    # Skip URLs already processed in a previous run
+    if seen_urls:
+        before  = len(unique)
+        unique  = [c for c in unique if c["url"] not in seen_urls]
+        skipped = before - len(unique)
+        if skipped:
+            print(f"  → {skipped} omitidas (ya procesadas anteriormente)")
+
+    print(f"  → {len(unique)} URLs nuevas para triage")
 
     if max_candidates and len(unique) > max_candidates:
         unique = unique[:max_candidates]
@@ -512,7 +641,14 @@ def triage_one(candidate: dict, client: anthropic.Anthropic, db_suffix: str) -> 
         resp = client.messages.create(
             model=TRIAGE_MODEL,
             max_tokens=400,
-            system=system_prompt,
+            # cache_control marks this block for Anthropic prompt caching.
+            # The DB summary (~7,000 tokens) is identical across all triage calls
+            # in a run, so calls 2+ are cache hits at ~90% lower input cost.
+            system=[{
+                "type":          "text",
+                "text":          system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{"role": "user", "content": content}],
         )
         raw = resp.content[0].text.strip()
@@ -753,9 +889,19 @@ def main():
 
     t0 = time.time()
 
-    candidates = phase_scrape(args.max_candidates)
+    seen_urls  = load_seen_urls()
+    if seen_urls:
+        print(f"\n  [Memoria de URLs: {len(seen_urls)} URLs previamente procesadas]")
+
+    candidates = phase_scrape(args.max_candidates, seen_urls)
     relevant   = phase_triage(candidates, client, db_suffix)
-    groups     = phase_group(relevant, client)
+
+    # Persist every URL analyzed this run so future runs skip them
+    new_seen = seen_urls | {c["url"] for c in candidates}
+    save_seen_urls(new_seen)
+    print(f"\n  [Memoria de URLs actualizada: {len(new_seen)} URLs en total]")
+
+    groups = phase_group(relevant, client)
 
     if not groups:
         print("\n  No se encontraron proyectos relevantes. Terminando sin generar fichas.")
