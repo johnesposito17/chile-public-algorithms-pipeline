@@ -159,6 +159,7 @@ Responde únicamente con el JSON estructurado solicitado."""
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             max_output_tokens=4000,
+            response_mime_type="application/json",
         ),
         contents=user_message,
     )

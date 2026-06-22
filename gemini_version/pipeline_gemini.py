@@ -15,8 +15,8 @@ Phase 3  GROUP    — Clusters URLs that describe the same project
 Phase 4  GENERATE — Produces one Word ficha per project cluster
 
 Model mapping vs. Claude version:
-  claude-haiku-4-5  → gemini-2.0-flash  (triage + grouping — fast/cheap)
-  claude-opus-4-8   → gemini-2.0-flash  (extraction — free tier compatible)
+  claude-haiku-4-5  → gemini-2.5-flash  (triage + grouping)
+  claude-opus-4-8   → gemini-2.5-pro    (extraction)
 
 Note: Anthropic prompt caching is not used in this version. Gemini context
 caching requires a separate setup and minimum token counts; adding it is left
@@ -139,14 +139,8 @@ INSTITUTIONAL_SOURCES = [
         "article_only": True,
     },
     {
-        "name": "Ministerio de Hacienda",
-        "url":  "https://www.hacienda.cl/noticias/",
-        "base": "https://www.hacienda.cl",
-        "article_only": True,
-    },
-    {
         "name": "Ministerio de Economía",
-        "url":  "https://www.economia.gob.cl/noticias/",
+        "url":  "https://www.economia.gob.cl/category/noticias",
         "base": "https://www.economia.gob.cl",
         "article_only": True,
     },
@@ -158,8 +152,8 @@ INSTITUTIONAL_SOURCES = [
     },
     {
         "name": "Laboratorio de Gobierno",
-        "url":  "https://lab.gob.cl/soluciones/",
-        "base": "https://lab.gob.cl",
+        "url":  "https://www.lab.gob.cl/noticias",
+        "base": "https://www.lab.gob.cl",
         "article_only": True,
     },
     {
@@ -628,6 +622,7 @@ def triage_one(candidate: dict, client: genai.Client, db_suffix: str) -> dict:
             config=types.GenerateContentConfig(
                 system_instruction=TRIAGE_SYSTEM_BASE + db_suffix,
                 max_output_tokens=600,
+                response_mime_type="application/json",
             ),
             contents=content,
         )
@@ -716,6 +711,7 @@ def phase_group(relevant: list[dict], client: genai.Client) -> list[list[dict]]:
             config=types.GenerateContentConfig(
                 system_instruction=GROUP_SYSTEM,
                 max_output_tokens=2000,
+                response_mime_type="application/json",
             ),
             contents=f"Agrupa estos artículos:\n\n{lines}",
         )
