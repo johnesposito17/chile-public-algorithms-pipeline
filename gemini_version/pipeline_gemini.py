@@ -831,16 +831,11 @@ def main():
 
     t0 = time.time()
 
-    seen_urls  = load_seen_urls()
-    if seen_urls:
-        print(f"\n  [Memoria de URLs: {len(seen_urls)} URLs previamente procesadas]")
-
-    candidates = phase_scrape(args.max_candidates, seen_urls)
+    # URL memory disabled: re-triage all URLs every run to catch any
+    # relevant algorithm regardless of previous runs. Re-enable by
+    # restoring load_seen_urls() / save_seen_urls() calls.
+    candidates = phase_scrape(args.max_candidates, seen_urls=None)
     relevant   = phase_triage(candidates, client, db_suffix)
-
-    new_seen = seen_urls | {c["url"] for c in candidates}
-    save_seen_urls(new_seen)
-    print(f"\n  [Memoria de URLs actualizada: {len(new_seen)} URLs en total]")
 
     groups = phase_group(relevant, client)
 
