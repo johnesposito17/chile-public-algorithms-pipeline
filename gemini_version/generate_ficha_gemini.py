@@ -32,7 +32,7 @@ from docx.oxml import OxmlElement
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.5-pro"
 MAX_CONTENT_CHARS = 12000
 OUTPUT_DIR = Path("fichas_output")
 
@@ -103,6 +103,22 @@ def truncate(text: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
 
 # ── GEMINI EXTRACTION ─────────────────────────────────────────────────────────
 
+def parse_json(text: str) -> dict:
+    """Extract and parse JSON from model output that may contain preamble text."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start != -1 and end > 0:
+            text = text[start:end]
+    return json.loads(text)
+
+
 SYSTEM_PROMPT = """Eres un asistente especializado en el Repositorio de Algoritmos Públicos del GobLab UAI de la Universidad Adolfo Ibáñez (Chile). Tu tarea es analizar documentos sobre sistemas algorítmicos del sector público chileno y extraer información estructurada para una ficha resumida que será presentada al Comité Editorial.
 
 Debes responder ÚNICAMENTE con un objeto JSON válido con exactamente estas claves. Si no hay información suficiente para un campo, usa "Sin información disponible".
@@ -147,13 +163,9 @@ Responde únicamente con el JSON estructurado solicitado."""
         contents=user_message,
     )
 
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    raw = response.text
     try:
-        return json.loads(raw)
+        return parse_json(raw)
     except json.JSONDecodeError:
         try:
             retry_response = client.models.generate_content(
@@ -171,12 +183,7 @@ Responde únicamente con el JSON estructurado solicitado."""
                     ))]),
                 ],
             )
-            raw2 = retry_response.text.strip()
-            if raw2.startswith("```"):
-                raw2 = raw2.split("```")[1]
-                if raw2.startswith("json"):
-                    raw2 = raw2[4:]
-            return json.loads(raw2)
+            return parse_json(retry_response.text)
         except Exception:
             return {"_parse_error": raw}
 

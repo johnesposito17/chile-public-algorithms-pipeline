@@ -51,8 +51,8 @@ from generate_ficha_gemini import fetch_url, extract_ficha_fields, build_docx, O
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 
-TRIAGE_MODEL  = "gemini-2.0-flash"
-EXTRACT_MODEL = "gemini-2.0-flash"
+TRIAGE_MODEL  = "gemini-2.5-flash"
+EXTRACT_MODEL = "gemini-2.5-pro"
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
 
@@ -528,6 +528,22 @@ def phase_scrape(max_candidates: int | None, seen_urls: set | None = None) -> li
 
 # ── PHASE 2: TRIAGE ───────────────────────────────────────────────────────────
 
+def parse_json(text: str) -> dict:
+    """Extract and parse JSON from model output that may contain preamble text."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        end   = text.rfind("}") + 1
+        if start != -1 and end > 0:
+            text = text[start:end]
+    return json.loads(text)
+
+
 TRIAGE_SYSTEM_BASE = """\
 Eres un asistente de investigación para el Repositorio de Algoritmos Públicos de GobLab UAI \
 (Universidad Adolfo Ibáñez, Chile).
@@ -611,16 +627,11 @@ def triage_one(candidate: dict, client: genai.Client, db_suffix: str) -> dict:
             model=TRIAGE_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=TRIAGE_SYSTEM_BASE + db_suffix,
-                max_output_tokens=400,
+                max_output_tokens=600,
             ),
             contents=content,
         )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        result = json.loads(raw)
+        result = parse_json(response.text)
     except Exception as e:
         result = {
             "relevant": False, "reason": f"Error en triage: {e}",
@@ -708,12 +719,7 @@ def phase_group(relevant: list[dict], client: genai.Client) -> list[list[dict]]:
             ),
             contents=f"Agrupa estos artículos:\n\n{lines}",
         )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        parsed = json.loads(raw)
+        parsed = parse_json(response.text)
 
         groups = []
         for g in parsed.get("groups", []):
