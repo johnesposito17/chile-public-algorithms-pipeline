@@ -21,9 +21,10 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 import pdfplumber
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from docx import Document
-from docx.shared import Pt, RGBColor, Inches, Cm
+from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -31,7 +32,7 @@ from docx.oxml import OxmlElement
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-MODEL = "gemini-2.5-pro"
+MODEL = "gemini-2.0-flash"
 MAX_CONTENT_CHARS = 12000
 OUTPUT_DIR = Path("fichas_output")
 
@@ -120,7 +121,7 @@ Debes responder ÚNICAMENTE con un objeto JSON válido con exactamente estas cla
 }"""
 
 
-def extract_ficha_fields(content_blocks: list[dict], model: genai.GenerativeModel) -> dict:
+def extract_ficha_fields(content_blocks: list[dict], client: genai.Client) -> dict:
     """
     content_blocks: [{"url": ..., "text": ...}, ...]
     Returns parsed ficha dict.
@@ -137,10 +138,13 @@ El contenido proviene de {len(content_blocks)} fuente(s):
 
 Responde únicamente con el JSON estructurado solicitado."""
 
-    chat = model.start_chat()
-    response = chat.send_message(
-        user_message,
-        generation_config={"max_output_tokens": 4000},
+    response = client.models.generate_content(
+        model=MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=4000,
+        ),
+        contents=user_message,
     )
 
     raw = response.text.strip()
@@ -152,10 +156,20 @@ Responde únicamente con el JSON estructurado solicitado."""
         return json.loads(raw)
     except json.JSONDecodeError:
         try:
-            retry_response = chat.send_message(
-                "Tu respuesta anterior fue cortada. Por favor, repite el JSON completo y válido "
-                "desde el principio, sin omitir ningún campo.",
-                generation_config={"max_output_tokens": 6000},
+            retry_response = client.models.generate_content(
+                model=MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    max_output_tokens=6000,
+                ),
+                contents=[
+                    types.Content(role="user", parts=[types.Part(text=user_message)]),
+                    types.Content(role="model", parts=[types.Part(text=raw)]),
+                    types.Content(role="user", parts=[types.Part(text=(
+                        "Tu respuesta anterior fue cortada. Por favor, repite el JSON completo y válido "
+                        "desde el principio, sin omitir ningún campo."
+                    ))]),
+                ],
             )
             raw2 = retry_response.text.strip()
             if raw2.startswith("```"):
@@ -358,11 +372,7 @@ def main():
         print("ERROR: Set GOOGLE_API_KEY environment variable.")
         sys.exit(1)
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name=MODEL,
-        system_instruction=SYSTEM_PROMPT,
-    )
+    client = genai.Client(api_key=api_key)
 
     if args.group:
         groups = [all_sources]
@@ -378,7 +388,7 @@ def main():
     for j, group in enumerate(groups, 1):
         label = group[0].get("url") or group[0].get("path") or f"grupo {j}"
         print(f"\nAnalizando con Gemini: {label} ...")
-        ficha = extract_ficha_fields(group, model)
+        ficha = extract_ficha_fields(group, client)
         fichas.append(ficha)
 
         if "_parse_error" not in ficha:

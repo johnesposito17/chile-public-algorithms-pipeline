@@ -15,8 +15,8 @@ Phase 3  GROUP    — Clusters URLs that describe the same project
 Phase 4  GENERATE — Produces one Word ficha per project cluster
 
 Model mapping vs. Claude version:
-  claude-haiku-4-5  → gemini-2.0-flash   (triage + grouping — fast/cheap)
-  claude-opus-4-8   → gemini-2.5-pro     (extraction — highest quality)
+  claude-haiku-4-5  → gemini-2.0-flash  (triage + grouping — fast/cheap)
+  claude-opus-4-8   → gemini-2.0-flash  (extraction — free tier compatible)
 
 Note: Anthropic prompt caching is not used in this version. Gemini context
 caching requires a separate setup and minimum token counts; adding it is left
@@ -44,14 +44,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-from generate_ficha_gemini import fetch_url, extract_ficha_fields, build_docx, OUTPUT_DIR
+from generate_ficha_gemini import fetch_url, extract_ficha_fields, build_docx, OUTPUT_DIR, SYSTEM_PROMPT
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 
 TRIAGE_MODEL  = "gemini-2.0-flash"
-EXTRACT_MODEL = "gemini-2.5-pro"
+EXTRACT_MODEL = "gemini-2.0-flash"
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
 
@@ -588,7 +589,7 @@ Reglas:
 """
 
 
-def triage_one(candidate: dict, triage_model: genai.GenerativeModel) -> dict:
+def triage_one(candidate: dict, client: genai.Client, db_suffix: str) -> dict:
     url  = candidate["url"]
     text = fetch_url(url)
 
@@ -606,9 +607,13 @@ def triage_one(candidate: dict, triage_model: genai.GenerativeModel) -> dict:
     content = f"URL: {url}\n\nContenido:\n{text[:4000]}"
 
     try:
-        response = triage_model.generate_content(
-            content,
-            generation_config={"max_output_tokens": 400},
+        response = client.models.generate_content(
+            model=TRIAGE_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=TRIAGE_SYSTEM_BASE + db_suffix,
+                max_output_tokens=400,
+            ),
+            contents=content,
         )
         raw = response.text.strip()
         if raw.startswith("```"):
@@ -628,7 +633,7 @@ def triage_one(candidate: dict, triage_model: genai.GenerativeModel) -> dict:
     return result
 
 
-def phase_triage(candidates: list[dict], triage_model: genai.GenerativeModel) -> list[dict]:
+def phase_triage(candidates: list[dict], client: genai.Client, db_suffix: str) -> list[dict]:
     print("\n" + "═" * 65)
     print("  FASE 2 — TRIAGE")
     print(f"  Gemini ({TRIAGE_MODEL}) lee el texto completo de cada artículo")
@@ -640,7 +645,7 @@ def phase_triage(candidates: list[dict], triage_model: genai.GenerativeModel) ->
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         future_to_idx = {
-            pool.submit(triage_one, c, triage_model): i
+            pool.submit(triage_one, c, client, db_suffix): i
             for i, c in enumerate(candidates)
         }
         for future in as_completed(future_to_idx):
@@ -672,7 +677,7 @@ def phase_triage(candidates: list[dict], triage_model: genai.GenerativeModel) ->
 
 # ── PHASE 3: GROUP ────────────────────────────────────────────────────────────
 
-def phase_group(relevant: list[dict], group_model: genai.GenerativeModel) -> list[list[dict]]:
+def phase_group(relevant: list[dict], client: genai.Client) -> list[list[dict]]:
     print("\n" + "═" * 65)
     print("  FASE 3 — AGRUPACIÓN POR PROYECTO")
     print("═" * 65)
@@ -695,9 +700,13 @@ def phase_group(relevant: list[dict], group_model: genai.GenerativeModel) -> lis
     print(f"\n  Agrupando {len(relevant)} artículos relevantes...\n")
 
     try:
-        response = group_model.generate_content(
-            f"Agrupa estos artículos:\n\n{lines}",
-            generation_config={"max_output_tokens": 2000},
+        response = client.models.generate_content(
+            model=TRIAGE_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=GROUP_SYSTEM,
+                max_output_tokens=2000,
+            ),
+            contents=f"Agrupa estos artículos:\n\n{lines}",
         )
         raw = response.text.strip()
         if raw.startswith("```"):
@@ -740,7 +749,7 @@ def phase_group(relevant: list[dict], group_model: genai.GenerativeModel) -> lis
 
 # ── PHASE 4: GENERATE FICHAS ──────────────────────────────────────────────────
 
-def phase_generate(groups: list[list[dict]], extract_model: genai.GenerativeModel, output_path: Path):
+def phase_generate(groups: list[list[dict]], client: genai.Client, output_path: Path):
     print("\n" + "═" * 65)
     print("  FASE 4 — GENERACIÓN DE FICHAS")
     print(f"  Modelo: {EXTRACT_MODEL}")
@@ -767,7 +776,7 @@ def phase_generate(groups: list[list[dict]], extract_model: genai.GenerativeMode
             continue
 
         print(f"    Enviando {len(blocks)} fuente(s) a Gemini para extracción...")
-        ficha = extract_ficha_fields(blocks, extract_model)
+        ficha = extract_ficha_fields(blocks, client)
         fichas.append(ficha)
         source_map.append(blocks)
 
@@ -798,8 +807,7 @@ def main():
         print("ERROR: Set GOOGLE_API_KEY environment variable.")
         sys.exit(1)
 
-    genai.configure(api_key=api_key)
-
+    client    = genai.Client(api_key=api_key)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_name  = args.output or f"pipeline_{timestamp}.docx"
     out_path  = OUTPUT_DIR / out_name
@@ -810,7 +818,6 @@ def main():
     print(f"  Salida: fichas_output/{out_name}")
     print("═" * 65)
 
-    # Auto-detect the database CSV if not specified via --db
     db_suffix = ""
     db_path   = args.db or (str(DEFAULT_DB_PATH) if DEFAULT_DB_PATH.exists() else None)
     if db_path:
@@ -820,22 +827,6 @@ def main():
     else:
         print("\n  (Sin base de datos — colocar CSV en 'given materials/' para deduplicación)")
 
-    # Create all models upfront with their respective system prompts
-    triage_system = TRIAGE_SYSTEM_BASE + db_suffix
-    triage_model = genai.GenerativeModel(
-        model_name=TRIAGE_MODEL,
-        system_instruction=triage_system,
-    )
-    group_model = genai.GenerativeModel(
-        model_name=TRIAGE_MODEL,
-        system_instruction=GROUP_SYSTEM,
-    )
-    from generate_ficha_gemini import SYSTEM_PROMPT
-    extract_model = genai.GenerativeModel(
-        model_name=EXTRACT_MODEL,
-        system_instruction=SYSTEM_PROMPT,
-    )
-
     t0 = time.time()
 
     seen_urls  = load_seen_urls()
@@ -843,19 +834,19 @@ def main():
         print(f"\n  [Memoria de URLs: {len(seen_urls)} URLs previamente procesadas]")
 
     candidates = phase_scrape(args.max_candidates, seen_urls)
-    relevant   = phase_triage(candidates, triage_model)
+    relevant   = phase_triage(candidates, client, db_suffix)
 
     new_seen = seen_urls | {c["url"] for c in candidates}
     save_seen_urls(new_seen)
     print(f"\n  [Memoria de URLs actualizada: {len(new_seen)} URLs en total]")
 
-    groups = phase_group(relevant, group_model)
+    groups = phase_group(relevant, client)
 
     if not groups:
         print("\n  No se encontraron proyectos relevantes. Terminando sin generar fichas.")
         sys.exit(0)
 
-    phase_generate(groups, extract_model, out_path)
+    phase_generate(groups, client, out_path)
 
     elapsed = int(time.time() - t0)
     mins, secs = divmod(elapsed, 60)
