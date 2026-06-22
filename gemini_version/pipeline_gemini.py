@@ -15,8 +15,8 @@ Phase 3  GROUP    — Clusters URLs that describe the same project
 Phase 4  GENERATE — Produces one Word ficha per project cluster
 
 Model mapping vs. Claude version:
-  claude-haiku-4-5  → gemini-2.5-flash  (triage + grouping)
-  claude-opus-4-8   → gemini-2.5-pro    (extraction)
+  claude-haiku-4-5  → gemini-2.5-pro  (triage + grouping)
+  claude-opus-4-8   → gemini-2.5-pro  (extraction)
 
 Note: Anthropic prompt caching is not used in this version. Gemini context
 caching requires a separate setup and minimum token counts; adding it is left
@@ -51,7 +51,7 @@ from generate_ficha_gemini import fetch_url, extract_ficha_fields, build_docx, O
 
 # ── MODELS ────────────────────────────────────────────────────────────────────
 
-TRIAGE_MODEL  = "gemini-2.5-flash"
+TRIAGE_MODEL  = "gemini-2.5-pro"
 EXTRACT_MODEL = "gemini-2.5-pro"
 
 # ── SCRAPING CONFIG ───────────────────────────────────────────────────────────
@@ -256,34 +256,75 @@ def scrape_mercadopublico() -> list[dict]:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page    = await browser.new_page()
+            await page.set_extra_http_headers({
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept-Language": HEADERS["Accept-Language"],
+            })
 
             for term in MERCADOPUBLICO_TERMS:
                 try:
-                    await page.goto("https://www.mercadopublico.cl/Home", timeout=30000)
-                    await asyncio.sleep(1)
-                    await page.fill("#txtBuscar", term)
-                    await page.keyboard.press("Enter")
-                    await page.wait_for_load_state("networkidle", timeout=20000)
+                    encoded    = requests.utils.quote(term)
+                    search_url = (
+                        "https://www.mercadopublico.cl/Procurement/Modules/RFB/"
+                        f"ListaBases.aspx?qs={encoded}&EstadoBases=todas"
+                    )
+                    await page.goto(search_url, timeout=30000)
+                    await page.wait_for_load_state("networkidle", timeout=25000)
                     await asyncio.sleep(3)
 
-                    search_frame = next(
-                        (f for f in page.frames
-                         if "BuscarLicitacion" in f.url and "?" in f.url),
-                        None,
-                    )
-                    if not search_frame:
-                        print(f"    MercadoPublico \"{term}\": no se encontró iframe de resultados")
-                        continue
+                    # Collect HTML from main page + every frame
+                    html_parts = []
+                    try:
+                        html_parts.append(
+                            await page.evaluate("() => document.documentElement.innerHTML")
+                        )
+                    except Exception:
+                        pass
+                    for frame in page.frames:
+                        try:
+                            html_parts.append(
+                                await frame.evaluate("() => document.documentElement.innerHTML")
+                            )
+                        except Exception:
+                            pass
+                    all_html = "\n".join(html_parts)
 
-                    html      = await search_frame.evaluate("() => document.body.innerHTML")
-                    urls_found = _re.findall(
-                        r"verFicha\('(https?://www\.mercadopublico\.cl/Procurement/[^']+)'\)",
-                        html,
-                    )
+                    urls_found: set[str] = set()
+
+                    # Pattern 1: verFicha() with a full HTTPS URL
+                    for u in _re.findall(r"verFicha\('(https?://[^']+)'\)", all_html):
+                        urls_found.add(u)
+
+                    # Pattern 2: Details page URL with ?qs= or ?idlicitacion=
+                    for u in _re.findall(
+                        r"(https?://www\.mercadopublico\.cl/Procurement/Modules/RFB/Details\?[^'\"<\s]+)",
+                        all_html,
+                    ):
+                        urls_found.add(u)
+
+                    # Pattern 3: <a href="...Details?...">
+                    for href in _re.findall(r'href=["\']([^"\']*Details\?[^"\']+)["\']', all_html):
+                        if href.startswith("http"):
+                            urls_found.add(href)
+                        elif href.startswith("/"):
+                            urls_found.add(f"https://www.mercadopublico.cl{href}")
+
+                    # Pattern 4: verFicha() with just a tender code (not a URL)
+                    for arg in _re.findall(r"verFicha\('([^']+)'\)", all_html):
+                        if not arg.startswith("http"):
+                            urls_found.add(
+                                f"https://www.mercadopublico.cl/Procurement/Modules/RFB/Details?qs={arg}"
+                            )
+
                     new_count = 0
                     for url in urls_found:
-                        code = url.split("idlicitacion=")[-1] if "idlicitacion=" in url else url
-                        if code not in seen_codes:
+                        if "idlicitacion=" in url:
+                            code = url.split("idlicitacion=")[-1]
+                        elif "qs=" in url:
+                            code = url.split("qs=")[-1]
+                        else:
+                            code = url
+                        if code and code not in seen_codes:
                             seen_codes.add(code)
                             results.append({
                                 "url":    url,
