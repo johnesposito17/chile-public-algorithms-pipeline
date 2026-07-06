@@ -34,8 +34,9 @@ MODEL = "claude-opus-4-8"
 MAX_CONTENT_CHARS = 12000   # truncate fetched content before sending to Claude
 OUTPUT_DIR = Path("fichas_output")
 
-TEAL = RGBColor(0x00, 0x94, 0x99)     # GobLab teal
-DARK = RGBColor(0x1A, 0x1A, 0x1A)
+TEAL  = RGBColor(0x00, 0x94, 0x99)    # GobLab teal — new algorithms
+AMBER = RGBColor(0xC0, 0x60, 0x00)    # amber — previously pipeline-reported algorithms
+DARK  = RGBColor(0x1A, 0x1A, 0x1A)
 
 
 # ── CONTENT FETCHING ──────────────────────────────────────────────────────────
@@ -222,6 +223,32 @@ def add_field_row(table, label, value):
     tcPr.append(shd)
 
 
+def add_prev_reported_banner(table, history_entry: dict):
+    """Amber banner indicating this algorithm appeared in a prior pipeline report."""
+    row  = table.add_row()
+    cell = row.cells[0]
+    cell.merge(row.cells[1])
+
+    date   = history_entry.get("first_reported", "fecha desconocida")
+    report = history_entry.get("report_file", "reporte anterior")
+    text   = f"◎  REPORTADO EN EJECUCIÓN ANTERIOR — {date}  ·  {report}"
+
+    para = cell.paragraphs[0]
+    run  = para.add_run(text)
+    run.bold             = True
+    run.font.color.rgb   = RGBColor(0xFF, 0xFF, 0xFF)
+    run.font.size        = Pt(9)
+    para.alignment       = WD_ALIGN_PARAGRAPH.CENTER
+
+    tc   = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd  = OxmlElement("w:shd")
+    shd.set(qn("w:fill"), "C06000")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:val"), "clear")
+    tcPr.append(shd)
+
+
 def build_docx(fichas: list[dict], source_map: list[dict], output_path: Path):
     doc = Document()
 
@@ -250,18 +277,39 @@ def build_docx(fichas: list[dict], source_map: list[dict], output_path: Path):
         run.font.size = Pt(9)
         run.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
+    # Run summary — counts new vs previously-reported algorithms
+    new_count  = sum(1 for f in fichas if not f.get("_previously_reported"))
+    prev_count = sum(1 for f in fichas if f.get("_previously_reported"))
+    if prev_count or new_count:
+        doc.add_paragraph()
+        summary_p = doc.add_paragraph()
+        summary_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        summary_run = summary_p.add_run(
+            f"Esta ejecución: {new_count} algoritmo(s) nuevo(s)  ·  "
+            f"{prev_count} reportado(s) en ejecuciones anteriores ◎"
+        )
+        summary_run.font.size   = Pt(9)
+        summary_run.font.bold   = True
+        summary_run.font.italic = True
+        summary_run.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+
     doc.add_paragraph()
 
     for i, (ficha, sources) in enumerate(zip(fichas, source_map), 1):
         if i > 1:
             doc.add_page_break()
 
-        # Algorithm number heading
+        previously_reported = ficha.get("_previously_reported", False)
+        history_entry       = ficha.get("_history_entry")
+        heading_color       = AMBER if previously_reported else TEAL
+
+        # Algorithm number heading — amber title for previously-reported, teal for new
+        prefix     = "◎ " if previously_reported else ""
         algo_title = doc.add_heading(
-            f"Algoritmo #{i}: {ficha.get('nombre', 'Sin nombre')}", level=2
+            f"{prefix}Algoritmo #{i}: {ficha.get('nombre', 'Sin nombre')}", level=2
         )
         for run in algo_title.runs:
-            run.font.color.rgb = TEAL
+            run.font.color.rgb = heading_color
 
         # Sources used
         src_labels = [s.get("url") or s.get("path") or "Fuente" for s in sources]
@@ -291,6 +339,8 @@ def build_docx(fichas: list[dict], source_map: list[dict], output_path: Path):
             row.cells[1].width = Cm(11)
 
         add_heading_row(table, "IDENTIFICACIÓN DEL SISTEMA")
+        if previously_reported and history_entry:
+            add_prev_reported_banner(table, history_entry)
         add_field_row(table, "Nombre", ficha.get("nombre"))
         add_field_row(table, "Objetivo del Sistema", ficha.get("objetivo_sistema"))
         add_field_row(table, "Decisión automatizada", ficha.get("decision_automatizada"))

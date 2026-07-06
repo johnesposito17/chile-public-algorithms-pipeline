@@ -33,6 +33,11 @@ Optimizations:
   - MercadoPublico source: procurement tenders are scraped directly from
     mercadopublico.cl using Playwright; tenders surface AI systems months before
     journalists cover them
+  - Pipeline history (pipeline_history.json): every algorithm included in a
+    generated report is saved locally; when a later run finds the same algorithm
+    again (via a new URL), it is included in the report but flagged as
+    "previously reported" — amber header instead of teal, banner showing the
+    original report date and filename.
 
 Usage:
     python3 pipeline.py
@@ -42,12 +47,15 @@ Usage:
 
 import sys
 import os
+import re
 import csv
 import json
 import time
 import asyncio
 import argparse
+import unicodedata
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -205,7 +213,8 @@ SKIP_DOMAINS    = {"facebook.com", "twitter.com", "instagram.com", "linkedin.com
 
 # ── URL MEMORY ────────────────────────────────────────────────────────────────
 
-SEEN_URLS_PATH = Path("seen_urls.json")
+SEEN_URLS_PATH       = Path("seen_urls.json")
+PIPELINE_HISTORY_PATH = Path("pipeline_history.json")
 
 
 def load_seen_urls() -> set:
@@ -220,6 +229,107 @@ def save_seen_urls(seen: set) -> None:
     """Persist the seen-URL set so future runs can skip already-processed URLs."""
     with open(SEEN_URLS_PATH, "w") as f:
         json.dump(sorted(seen), f, indent=2, ensure_ascii=False)
+
+
+# ── PIPELINE HISTORY ──────────────────────────────────────────────────────────
+# Tracks every algorithm the pipeline has included in a generated report.
+# Separate from seen_urls.json (URL-level) and the main DB CSV (repository-level).
+# Purpose: when a new article surfaces about an algorithm already flagged in a
+# prior pipeline run (but not yet added to the repository), the committee can
+# see it marked as "previously reported" rather than treating it as a fresh find.
+
+def load_pipeline_history() -> list[dict]:
+    """Load the list of algorithms previously included in pipeline reports."""
+    if PIPELINE_HISTORY_PATH.exists():
+        with open(PIPELINE_HISTORY_PATH) as f:
+            return json.load(f)
+    return []
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercase, strip accents, collapse whitespace — for fuzzy name comparison."""
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _name_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def find_in_history(canonical_name: str, history: list[dict]) -> dict | None:
+    """
+    Return the history entry whose canonical_name best matches the given name,
+    or None if no entry exceeds the similarity threshold (0.82).
+
+    The threshold is intentionally conservative: we prefer a false negative
+    (miss a previously-reported algorithm) over a false positive (wrongly flag
+    a different algorithm as previously reported).
+    """
+    if not canonical_name or not history:
+        return None
+    n1 = _normalize_for_match(canonical_name)
+    best_entry = None
+    best_score = 0.0
+    for entry in history:
+        n2 = _normalize_for_match(entry.get("canonical_name", ""))
+        if not n2:
+            continue
+        score = _name_similarity(n1, n2)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+    return best_entry if best_score >= 0.82 else None
+
+
+def mark_previously_reported(groups: list[list[dict]], history: list[dict]) -> None:
+    """
+    Annotate each group's items with previously_reported=True/False and
+    history_entry (the matching history record, or None).
+    Modifies groups in-place.
+    """
+    for group in groups:
+        name  = group[0].get("canonical_name", "")
+        entry = find_in_history(name, history)
+        for item in group:
+            item["previously_reported"] = entry is not None
+            item["history_entry"]       = entry
+
+
+def save_to_pipeline_history(
+    groups: list[list[dict]],
+    fichas: list[dict],
+    report_file: str,
+) -> None:
+    """
+    Append genuinely new algorithms (not previously_reported) to pipeline_history.json.
+    Already-reported algorithms are not re-saved; their first_reported date is preserved.
+    """
+    history   = load_pipeline_history()
+    date_str  = datetime.now().strftime("%Y-%m-%d")
+    added     = 0
+
+    for group, ficha in zip(groups, fichas):
+        if group[0].get("previously_reported"):
+            continue
+        if "_parse_error" in ficha:
+            continue
+        history.append({
+            "canonical_name":        group[0].get("canonical_name") or ficha.get("nombre", ""),
+            "canonical_institution": group[0].get("canonical_institution") or ficha.get("institucion_publica", ""),
+            "ficha_nombre":          ficha.get("nombre", ""),
+            "first_reported":        date_str,
+            "report_file":           report_file,
+            "urls":                  [item["url"] for item in group],
+        })
+        added += 1
+
+    with open(PIPELINE_HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=2, ensure_ascii=False)
+
+    total = len(history)
+    print(f"\n  [Historial de pipeline: +{added} nuevo(s) → {total} algoritmos en historial total]")
 
 
 # ── EXISTING DATABASE ─────────────────────────────────────────────────────────
@@ -808,7 +918,17 @@ def phase_group(relevant: list[dict], client: anthropic.Anthropic) -> list[list[
 
 # ── PHASE 4: GENERATE FICHAS ──────────────────────────────────────────────────
 
-def phase_generate(groups: list[list[dict]], client: anthropic.Anthropic, output_path: Path):
+def phase_generate(
+    groups: list[list[dict]],
+    client: anthropic.Anthropic,
+    output_path: Path,
+) -> list[dict]:
+    """
+    Generate one Word ficha per project group.
+    Returns the list of ficha dicts (used by the caller to persist pipeline history).
+    Groups annotated with previously_reported=True by mark_previously_reported() get
+    an amber visual treatment in the Word doc; new groups get the standard teal style.
+    """
     print("\n" + "═" * 65)
     print("  FASE 4 — GENERACIÓN DE FICHAS")
     print(f"  Modelo: {EXTRACT_MODEL}")
@@ -818,8 +938,11 @@ def phase_generate(groups: list[list[dict]], client: anthropic.Anthropic, output
     source_map = []
 
     for i, group in enumerate(groups, 1):
-        name = group[0].get("canonical_name") or f"Proyecto {i}"
-        print(f"\n  [{i}/{len(groups)}] {name}")
+        name         = group[0].get("canonical_name") or f"Proyecto {i}"
+        prev_flag    = group[0].get("previously_reported", False)
+        history_entry = group[0].get("history_entry")
+        marker       = "◎ ANTERIOR" if prev_flag else "NUEVO"
+        print(f"\n  [{i}/{len(groups)}] [{marker}] {name}")
 
         blocks = []
         for item in group:
@@ -836,6 +959,11 @@ def phase_generate(groups: list[list[dict]], client: anthropic.Anthropic, output
 
         print(f"    Enviando {len(blocks)} fuente(s) a Claude para extracción...")
         ficha = extract_ficha_fields(blocks, client)
+
+        # Inject pipeline-history metadata so build_docx can apply the right style
+        ficha["_previously_reported"] = prev_flag
+        ficha["_history_entry"]       = history_entry
+
         fichas.append(ficha)
         source_map.append(blocks)
 
@@ -845,6 +973,7 @@ def phase_generate(groups: list[list[dict]], client: anthropic.Anthropic, output
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     build_docx(fichas, source_map, output_path)
+    return fichas
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -889,9 +1018,13 @@ def main():
 
     t0 = time.time()
 
-    seen_urls  = load_seen_urls()
+    seen_urls = load_seen_urls()
     if seen_urls:
         print(f"\n  [Memoria de URLs: {len(seen_urls)} URLs previamente procesadas]")
+
+    history = load_pipeline_history()
+    if history:
+        print(f"  [Historial de pipeline: {len(history)} algoritmos reportados en ejecuciones anteriores]")
 
     candidates = phase_scrape(args.max_candidates, seen_urls)
     relevant   = phase_triage(candidates, client, db_suffix)
@@ -907,7 +1040,30 @@ def main():
         print("\n  No se encontraron proyectos relevantes. Terminando sin generar fichas.")
         sys.exit(0)
 
-    phase_generate(groups, client, out_path)
+    # Annotate each group: were these algorithms already reported by the pipeline?
+    mark_previously_reported(groups, history)
+    new_count  = sum(1 for g in groups if not g[0].get("previously_reported"))
+    prev_count = sum(1 for g in groups if g[0].get("previously_reported"))
+
+    print("\n" + "═" * 65)
+    print("  RESUMEN DE HALLAZGOS")
+    print("═" * 65)
+    print(f"  Algoritmos nuevos (no reportados antes):  {new_count}")
+    print(f"  Reportados en ejecuciones anteriores ◎:  {prev_count}")
+    print(f"  Total de fichas a generar:                {len(groups)}")
+    if prev_count:
+        print("  ─" * 32)
+        print("  Algoritmos marcados como anteriores:")
+        for g in groups:
+            if g[0].get("previously_reported"):
+                entry = g[0]["history_entry"]
+                print(f"    ◎ {g[0].get('canonical_name','?')} "
+                      f"(reportado el {entry['first_reported']} en {entry['report_file']})")
+
+    fichas = phase_generate(groups, client, out_path)
+
+    # Persist new algorithms to pipeline history for future runs
+    save_to_pipeline_history(groups, fichas, out_name)
 
     elapsed = int(time.time() - t0)
     mins, secs = divmod(elapsed, 60)
