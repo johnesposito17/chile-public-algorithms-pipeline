@@ -169,18 +169,8 @@ INSTITUTIONAL_SOURCES = [
         "article_only": True,
     },
     # Economic / regulatory ministries
-    {
-        "name": "Ministerio de Hacienda",
-        "url":  "https://www.hacienda.cl/noticias/",
-        "base": "https://www.hacienda.cl",
-        "article_only": True,
-    },
-    {
-        "name": "Ministerio de Economía",
-        "url":  "https://www.economia.gob.cl/noticias/",
-        "base": "https://www.economia.gob.cl",
-        "article_only": True,
-    },
+    # NOTE: hacienda.cl/noticias/ and economia.gob.cl/noticias/ both returned
+    # 404 as of July 2026. Re-enable with updated URLs when they are fixed.
     {
         "name": "Servicio Civil",
         "url":  "https://www.serviciocivil.cl/noticias/",
@@ -188,12 +178,8 @@ INSTITUTIONAL_SOURCES = [
         "article_only": True,
     },
     # Innovation lab & planning
-    {
-        "name": "Laboratorio de Gobierno",
-        "url":  "https://lab.gob.cl/soluciones/",
-        "base": "https://lab.gob.cl",
-        "article_only": True,
-    },
+    # NOTE: lab.gob.cl/soluciones/ returned 404 as of July 2026.
+    # Re-enable with the correct URL when resolved.
     {
         "name": "DIPRES — Balance de Gestión Integral",
         "url":  "https://www.dipres.gob.cl/597/w3-propertyvalue-15160.html",
@@ -298,19 +284,23 @@ def mark_previously_reported(groups: list[list[dict]], history: list[dict]) -> N
 
 
 def save_to_pipeline_history(
-    groups: list[list[dict]],
-    fichas: list[dict],
+    pairs: list[tuple],
     report_file: str,
 ) -> None:
     """
-    Append genuinely new algorithms (not previously_reported) to pipeline_history.json.
-    Already-reported algorithms are not re-saved; their first_reported date is preserved.
-    """
-    history   = load_pipeline_history()
-    date_str  = datetime.now().strftime("%Y-%m-%d")
-    added     = 0
+    Append genuinely new algorithms to pipeline_history.json.
 
-    for group, ficha in zip(groups, fichas):
+    pairs — list of (group, ficha) tuples returned by phase_generate.
+    Using explicit pairs (not zip(groups, fichas)) avoids misalignment when
+    some groups produce no ficha due to missing content or a mid-run error.
+    Already-reported algorithms are not re-saved; their first_reported date
+    is preserved.
+    """
+    history  = load_pipeline_history()
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    added    = 0
+
+    for group, ficha in pairs:
         if group[0].get("previously_reported"):
             continue
         if "_parse_error" in ficha:
@@ -922,26 +912,30 @@ def phase_generate(
     groups: list[list[dict]],
     client: anthropic.Anthropic,
     output_path: Path,
-) -> list[dict]:
+) -> list[tuple]:
     """
     Generate one Word ficha per project group.
-    Returns the list of ficha dicts (used by the caller to persist pipeline history).
-    Groups annotated with previously_reported=True by mark_previously_reported() get
-    an amber visual treatment in the Word doc; new groups get the standard teal style.
+
+    Returns a list of (group, ficha) pairs for every group that produced a
+    ficha — used by save_to_pipeline_history.  Using pairs (not a bare ficha
+    list) avoids misalignment when some groups are skipped (no content) or
+    when generation is interrupted mid-run by an API credit error.
+
+    Groups annotated with previously_reported=True by mark_previously_reported()
+    get an amber visual treatment in the Word doc; new groups get teal.
     """
     print("\n" + "═" * 65)
     print("  FASE 4 — GENERACIÓN DE FICHAS")
     print(f"  Modelo: {EXTRACT_MODEL}")
     print("═" * 65)
 
-    fichas     = []
-    source_map = []
+    generated = []   # list of (group, ficha, source_blocks)
 
     for i, group in enumerate(groups, 1):
-        name         = group[0].get("canonical_name") or f"Proyecto {i}"
-        prev_flag    = group[0].get("previously_reported", False)
+        name          = group[0].get("canonical_name") or f"Proyecto {i}"
+        prev_flag     = group[0].get("previously_reported", False)
         history_entry = group[0].get("history_entry")
-        marker       = "◎ ANTERIOR" if prev_flag else "NUEVO"
+        marker        = "◎ ANTERIOR" if prev_flag else "NUEVO"
         print(f"\n  [{i}/{len(groups)}] [{marker}] {name}")
 
         blocks = []
@@ -958,22 +952,36 @@ def phase_generate(
             continue
 
         print(f"    Enviando {len(blocks)} fuente(s) a Claude para extracción...")
-        ficha = extract_ficha_fields(blocks, client)
+        try:
+            ficha = extract_ficha_fields(blocks, client)
+        except anthropic.BadRequestError as e:
+            if "credit balance" in str(e).lower():
+                print(f"\n  ✗ Créditos de Anthropic agotados — generación interrumpida.")
+                print(f"  Fichas completadas: {len(generated)} de {len(groups)}.")
+                print(f"  Agrega créditos en console.anthropic.com → Plans & Billing")
+                print(f"  y vuelve a ejecutar. Las URLs ya procesadas no serán re-triageadas.")
+                break
+            raise
 
         # Inject pipeline-history metadata so build_docx can apply the right style
         ficha["_previously_reported"] = prev_flag
         ficha["_history_entry"]       = history_entry
-
-        fichas.append(ficha)
-        source_map.append(blocks)
+        generated.append((group, ficha, blocks))
 
         if "_parse_error" not in ficha:
             n = len(ficha.get("fuentes_apa") or [])
             print(f"    → {ficha.get('nombre', '?')} | {ficha.get('institucion_publica', '?')} | {n} cita(s)")
 
+    fichas     = [f for _, f, _ in generated]
+    source_map = [b for _, _, b in generated]
+
     OUTPUT_DIR.mkdir(exist_ok=True)
-    build_docx(fichas, source_map, output_path)
-    return fichas
+    if fichas:
+        build_docx(fichas, source_map, output_path)
+    else:
+        print(f"\n  (Sin fichas generadas — no se crea archivo Word)")
+
+    return [(g, f) for g, f, _ in generated]
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -1060,10 +1068,10 @@ def main():
                 print(f"    ◎ {g[0].get('canonical_name','?')} "
                       f"(reportado el {entry['first_reported']} en {entry['report_file']})")
 
-    fichas = phase_generate(groups, client, out_path)
+    pairs = phase_generate(groups, client, out_path)
 
     # Persist new algorithms to pipeline history for future runs
-    save_to_pipeline_history(groups, fichas, out_name)
+    save_to_pipeline_history(pairs, out_name)
 
     elapsed = int(time.time() - t0)
     mins, secs = divmod(elapsed, 60)
