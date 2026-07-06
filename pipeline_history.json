@@ -68,5 +68,108 @@
     "urls": [
       "https://aduananews.com/chile-incorpora-un-camion-escaner-con-inteligencia-artificial-para-reforzar-el-control-aduanero/"
     ]
+  },
+  {
+    "canonical_name": "Proyecto Piloto de Monitoreo para el Barrio Norte de Temuco",
+    "canonical_institution": "Municipalidad de Temuco",
+    "ficha_nombre": "Sistema de inteligencia artificial SafeByWolf para monitoreo y patrullaje de seguridad (Municipalidad de Temuco)",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://www.temuco.cl/vecinos-de-barrio-norte-de-temuco-valoran-nuevo-sistema-de-monitoreo-con-inteligencia-artificial/",
+      "https://www.temuco.cl/persecucion-municipal-aerea-y-terrestre-termina-con-recuperacion-de-vehiculo-robado-y-tres-detenidos-en-temuco/"
+    ]
+  },
+  {
+    "canonical_name": "Observatorio de Secuestros",
+    "canonical_institution": "Subsecretaría de Prevención del Delito del Ministerio de Seguridad Pública",
+    "ficha_nombre": "Observatorio de Secuestros",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://www.gob.cl/noticias/nuevo-observatorio-secuestros-fortalecimiento-combate-crimen-organizado/"
+    ]
+  },
+  {
+    "canonical_name": "Ampliación y Mejoramiento del Sistema de Televigilancia con Pórticos Lectores de Patentes (LPR) de O'Higgins",
+    "canonical_institution": "Gobierno Regional de O'Higgins",
+    "ficha_nombre": "Sistema de Televigilancia con Pórticos Lectores de Patentes (LPR) - Región de O'Higgins",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://eltipografo.cl/2026/03/consejo-regional-aprobo-10-700-millones-para-porticos-inteligentes-en-ohiggins"
+    ]
+  },
+  {
+    "canonical_name": "Sistema con IA para detectar vehículos robados de Lo Barnechea",
+    "canonical_institution": "Municipalidad de Lo Barnechea",
+    "ficha_nombre": "Sistema con IA para detectar vehículos robados de Lo Barnechea",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://www.chicureohoy.cl/actualidad/lo-barnechea-estrena-sistema-con-ia-para-detectar-vehiculos-robados/"
+    ]
+  },
+  {
+    "canonical_name": "Central de Cámaras de Vigilancia Comunitaria de Coyhaique",
+    "canonical_institution": "Municipalidad de Coyhaique",
+    "ficha_nombre": "Central de Cámaras de Vigilancia Comunitaria de Coyhaique con Inteligencia Artificial",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://www.diarioregionalaysen.cl/noticia/actualidad/2025/12/funcionario-de-carabineros-integrara-central-de-camaras-de-seguridad-comunitaria-de-coyhaique"
+    ]
+  },
+  {
+    "canonical_name": "Buscador de Jurisprudencia del Poder Judicial",
+    "canonical_institution": "Poder Judicial de Chile",
+    "ficha_nombre": "Buscador de Jurisprudencia del Poder Judicial",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://www.latercera.com/nacional/noticia/poder-judicial-estrena-buscador-jurisprudencial-con-uso-de-ia-y-acceso-a-mas-de-1-millon-500-mil-sentencias/",
+      "https://www.diarioconstitucional.cl/2025/07/08/poder-judicial-estrena-nuevo-buscador-jurisprudencial-con-uso-de-inteligencia-artificial-y-acceso-a-mas-de-1-millon-500-mil-sentencias/"
+    ]
+  },
+  {
+    "canonical_name": "Sistema de Alerta de Emergencia (SAE)",
+    "canonical_institution": "Servicio Nacional de Prevención y Respuesta ante Desastres (SENAPRED)",
+    "ficha_nombre": "Sistema de Alerta de Emergencia (SAE)",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_152838.docx",
+    "urls": [
+      "https://fmcandelaria.cl/se-realizara-prueba-del-sistema-de-alerta-temprana-sae-este-miercoles-en"
+    ]
+  },
+  {
+    "canonical_name": "Plan de Modernización Tecnológica del SEIA con Inteligencia Artificial (e-SEIA)",
+    "canonical_institution": "Servicio de Evaluación Ambiental (SEA)",
+    "ficha_nombre": "Plan de Modernización Tecnológica del SEIA (herramientas de IA para la evaluación ambiental)",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_154451.docx",
+    "urls": [
+      "https://www.latercera.com/sustentabilidad/noticia/sea-incorpora-ia-para-modernizar-la-evaluacion-ambiental-en-chile/"
+    ]
+  },
+  {
+    "canonical_name": "Sistema de cámaras y pórticos IA para fiscalización de transporte de carga",
+    "canonical_institution": "Servicio de Impuestos Internos (SII)",
+    "ficha_nombre": "Sistema de Cámaras de Televigilancia y Pórticos Lectores de Patentes con Inteligencia Artificial - Región de Antofagasta",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_154451.docx",
+    "urls": [
+      "https://dprantofagasta.dpr.gob.cl/noticias/2025/09/04/core-aprobo-proyecto-de-camaras-y-porticos-ia-presentado-por-delegacion-presidencial-regional-por-mas-de-17-mil-millones-de-pesos/",
+      "https://logistica360chile.cl/ia-y-porticos-inteligentes-la-nueva-ofensiva-para-fiscalizar-camiones-carga/"
+    ]
+  },
+  {
+    "canonical_name": "Sistema de propuesta de montos en Formulario 22 con validaciones K y J - Operación Renta 2026",
+    "canonical_institution": "Servicio de Impuestos Internos (SII)",
+    "ficha_nombre": "Herramienta de propuesta de montos para el Formulario 22 (Operación Renta 2026) y validaciones 'J' y 'K'",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_154451.docx",
+    "urls": [
+      "https://www.redimin.cl/sii-lanza-nueva-herramienta-para-la-operacion-renta-2026-y-propondra-montos-en-el-formulario-22-por-primera-vez"
+    ]
   }
 ]

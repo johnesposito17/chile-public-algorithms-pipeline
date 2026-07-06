@@ -143,13 +143,6 @@ DIRECT_NEWS_FEEDS = [
     # ChileCompra announces procurement tenders and licitaciones here;
     # AI/algorithm tenders often appear months before press coverage
     {"name": "ChileCompra",     "url": "https://www.chilecompra.cl/feed/"},
-    # Additional Chilean news sources for broader coverage
-    {"name": "El Mostrador",    "url": "https://www.elmostrador.cl/feed/"},
-    {"name": "BioBio Chile",    "url": "https://www.biobiochile.cl/feed/"},
-    {"name": "Emol",            "url": "https://www.emol.com/rss/tecnologia.xml"},
-    {"name": "Publimetro",      "url": "https://www.publimetro.cl/feed/"},
-    {"name": "Senado RSS",      "url": "https://www.senado.cl/senado/rss"},
-    {"name": "GobDigital Blog", "url": "https://digital.gob.cl/feed/"},
 ]
 
 # MercadoPublico search terms — these drive Playwright searches on the
@@ -223,38 +216,34 @@ INSTITUTIONAL_SOURCES = [
         "base": "https://www.dipres.gob.cl",
         "article_only": False,
     },
-    # Accountability / audit
+    # Accountability / audit — Contraloría noticias page (article links are
+    # in /web/cgr/noticias/-/asset_publisher/... format, need 5+ word slugs)
     {
         "name": "Contraloría General de la República",
         "url":  "https://www.contraloria.cl/web/cgr/noticias",
         "base": "https://www.contraloria.cl",
+        "article_only": False,   # Contraloría URLs don't fit the word-count heuristic
+        "url_must_contain": "/content/",  # only keep URLs that look like articles
+    },
+    # Labour ministry — AI tools for employment / inspection
+    {
+        "name": "Ministerio del Trabajo — Noticias",
+        "url":  "https://www.mintrab.gob.cl/noticias/",
+        "base": "https://www.mintrab.gob.cl",
         "article_only": True,
     },
-    # Congressional monitoring — legislation and committee reports mentioning AI
+    # Health digital — AI in health systems
     {
-        "name": "Biblioteca del Congreso Nacional",
-        "url":  "https://www.bcn.cl/sala/index_html?busqueda=inteligencia+artificial&portal=10221",
-        "base": "https://www.bcn.cl",
-        "article_only": False,
-    },
-    {
-        "name": "Cámara de Diputados — Noticias",
-        "url":  "https://www.camara.cl/noticias/index.aspx",
-        "base": "https://www.camara.cl",
+        "name": "MINSAL — Noticias",
+        "url":  "https://www.minsal.cl/category/noticias/",
+        "base": "https://www.minsal.cl",
         "article_only": True,
     },
-    # Municipal / IDeA Chile — public innovation
+    # Interior — regional delegations often announce AI/surveillance investments
     {
-        "name": "IDeA Chile — Proyectos",
-        "url":  "https://www.idea.cl/proyectos/",
-        "base": "https://www.idea.cl",
-        "article_only": False,
-    },
-    # Subsecretaría de Prevención del Delito — predictive policing / risk tools
-    {
-        "name": "Subsecretaría Prevención del Delito",
-        "url":  "https://www.spd.gob.cl/noticias/",
-        "base": "https://www.spd.gob.cl",
+        "name": "Ministerio del Interior — Noticias",
+        "url":  "https://www.interior.gob.cl/noticias/",
+        "base": "https://www.interior.gob.cl",
         "article_only": True,
     },
 ]
@@ -605,6 +594,7 @@ def scrape_institutional(source) -> list[dict]:
         results      = []
         seen         = set()
         article_only = source.get("article_only", False)
+        must_contain = source.get("url_must_contain")
 
         for tag in soup.find_all("a", href=True):
             href     = tag.get("href", "")
@@ -617,6 +607,8 @@ def scrape_institutional(source) -> list[dict]:
             if any(d in resolved for d in SKIP_DOMAINS):
                 continue
             if article_only and not is_article_link(resolved):
+                continue
+            if must_contain and must_contain not in resolved:
                 continue
             if resolved in seen:
                 continue
@@ -828,7 +820,24 @@ def triage_one(candidate: dict, client: anthropic.Anthropic, db_suffix: str) -> 
             if raw.startswith("json"):
                 raw = raw[4:]
         result = json.loads(raw)
+    except anthropic.AuthenticationError:
+        print("\n  ✗ ANTHROPIC_API_KEY inválida o no establecida — abortando triage.")
+        sys.exit(1)
+    except anthropic.BadRequestError as e:
+        if "credit balance" in str(e).lower():
+            print("\n  ✗ Créditos de Anthropic agotados durante triage.")
+            print("  Agrega créditos en console.anthropic.com → Plans & Billing")
+            sys.exit(1)
+        result = {
+            "relevant": False, "reason": f"BadRequestError: {e}",
+            "system_name": None, "institution": None,
+            "is_duplicate": False, "duplicate_of": None,
+        }
     except Exception as e:
+        # Log unexpected errors so silent failures are visible
+        err_str = str(e)
+        if any(k in err_str.lower() for k in ["api", "auth", "credit", "rate", "timeout"]):
+            print(f"\n  WARNING triage error ({type(e).__name__}): {err_str[:120]}")
         result = {
             "relevant": False, "reason": f"Error en triage: {e}",
             "system_name": None, "institution": None,
@@ -905,7 +914,11 @@ Responde ÚNICAMENTE con JSON válido:
 Reglas:
 - Cada índice debe aparecer exactamente una vez.
 - Si un artículo no tiene par claro, ponlo solo en su propio grupo.
-- Usa el nombre e institución más oficial/completo como canónico.\
+- Usa el nombre e institución más oficial/completo como canónico.
+- CRÍTICO: Dos artículos que hablan de tecnología similar (ej. pórticos con cámaras)
+  pero de instituciones o regiones distintas son sistemas DISTINTOS. NO los agrupes
+  a menos que se mencione explícitamente el mismo proyecto o contrato.
+- Si la institución es diferente o la región es diferente, crea grupos separados.\
 """
 
 
