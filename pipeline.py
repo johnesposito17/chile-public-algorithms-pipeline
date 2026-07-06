@@ -103,6 +103,31 @@ def _news_terms_with_date():
         # English — some coverage is in English
         "artificial intelligence Chile government public sector",
         "machine learning Chile ministry algorithm",
+        # Security / justice / social services (underrepresented in original set)
+        "inteligencia artificial Carabineros Chile",
+        "sistema predicción delitos Chile policía",
+        "IA riesgo social Chile gobierno",
+        "sistema focalización Chile algoritmo beneficio",
+        "inteligencia artificial justicia Chile tribunal",
+        "algoritmo sentencia Chile poder judicial",
+        "reconocimiento biométrico Chile gobierno servicio",
+        "sistema automatizado beneficios sociales Chile",
+        # Tax / finance / audit
+        "inteligencia artificial SII Chile impuesto",
+        "algoritmo detección fraude Chile fisco",
+        "análisis predictivo Contraloría Chile",
+        "data science ministerio Chile",
+        # Emergency / health specific
+        "sistema alerta temprana Chile SENAPRED emergencia",
+        "inteligencia artificial Gendarmería Chile penal",
+        "IA vigilancia epidemiológica Chile MINSAL",
+        "modelo predicción salud Chile hospital algoritmo",
+        # Procurement and disability
+        "sistema experto Chile decisión pública",
+        "procesamiento lenguaje natural gobierno Chile",
+        "visión artificial Chile inspección gobierno",
+        "COMPIN algoritmo evaluación Chile",
+        "ChileAtiende sistema inteligente Chile",
     ]
     return [f"{t} after:{_ONE_YEAR_AGO}" for t in terms]
 
@@ -118,6 +143,13 @@ DIRECT_NEWS_FEEDS = [
     # ChileCompra announces procurement tenders and licitaciones here;
     # AI/algorithm tenders often appear months before press coverage
     {"name": "ChileCompra",     "url": "https://www.chilecompra.cl/feed/"},
+    # Additional Chilean news sources for broader coverage
+    {"name": "El Mostrador",    "url": "https://www.elmostrador.cl/feed/"},
+    {"name": "BioBio Chile",    "url": "https://www.biobiochile.cl/feed/"},
+    {"name": "Emol",            "url": "https://www.emol.com/rss/tecnologia.xml"},
+    {"name": "Publimetro",      "url": "https://www.publimetro.cl/feed/"},
+    {"name": "Senado RSS",      "url": "https://www.senado.cl/senado/rss"},
+    {"name": "GobDigital Blog", "url": "https://digital.gob.cl/feed/"},
 ]
 
 # MercadoPublico search terms — these drive Playwright searches on the
@@ -127,6 +159,11 @@ MERCADOPUBLICO_TERMS = [
     "machine learning",
     "algoritmo",
     "modelo predictivo",
+    "sistema experto",
+    "procesamiento lenguaje natural",
+    "visión computacional",
+    "análisis predictivo",
+    "automatización inteligente",
 ]
 
 INSTITUTIONAL_SOURCES = [
@@ -182,9 +219,43 @@ INSTITUTIONAL_SOURCES = [
     # Re-enable with the correct URL when resolved.
     {
         "name": "DIPRES — Balance de Gestión Integral",
-        "url":  "https://www.dipres.gob.cl/597/w3-propertyvalue-15160.html",
+        "url":  "https://www.dipres.gob.cl/598/w3-channel.html",
         "base": "https://www.dipres.gob.cl",
         "article_only": False,
+    },
+    # Accountability / audit
+    {
+        "name": "Contraloría General de la República",
+        "url":  "https://www.contraloria.cl/web/cgr/noticias",
+        "base": "https://www.contraloria.cl",
+        "article_only": True,
+    },
+    # Congressional monitoring — legislation and committee reports mentioning AI
+    {
+        "name": "Biblioteca del Congreso Nacional",
+        "url":  "https://www.bcn.cl/sala/index_html?busqueda=inteligencia+artificial&portal=10221",
+        "base": "https://www.bcn.cl",
+        "article_only": False,
+    },
+    {
+        "name": "Cámara de Diputados — Noticias",
+        "url":  "https://www.camara.cl/noticias/index.aspx",
+        "base": "https://www.camara.cl",
+        "article_only": True,
+    },
+    # Municipal / IDeA Chile — public innovation
+    {
+        "name": "IDeA Chile — Proyectos",
+        "url":  "https://www.idea.cl/proyectos/",
+        "base": "https://www.idea.cl",
+        "article_only": False,
+    },
+    # Subsecretaría de Prevención del Delito — predictive policing / risk tools
+    {
+        "name": "Subsecretaría Prevención del Delito",
+        "url":  "https://www.spd.gob.cl/noticias/",
+        "base": "https://www.spd.gob.cl",
+        "article_only": True,
     },
 ]
 
@@ -1037,10 +1108,14 @@ def main():
     candidates = phase_scrape(args.max_candidates, seen_urls)
     relevant   = phase_triage(candidates, client, db_suffix)
 
-    # Persist every URL analyzed this run so future runs skip them
-    new_seen = seen_urls | {c["url"] for c in candidates}
-    save_seen_urls(new_seen)
-    print(f"\n  [Memoria de URLs actualizada: {len(new_seen)} URLs en total]")
+    # Only permanently skip URLs that were irrelevant or duplicate.
+    # Relevant URLs are only marked seen after they successfully produce a ficha —
+    # if Phase 4 crashes mid-run, those URLs stay out of seen_urls so the next
+    # run retries them automatically.
+    relevant_url_set = {r["url"] for r in relevant}
+    safe_to_skip     = seen_urls | ({c["url"] for c in candidates} - relevant_url_set)
+    save_seen_urls(safe_to_skip)
+    print(f"\n  [Memoria de URLs: {len(safe_to_skip)} irrelevantes/duplicados en caché]")
 
     groups = phase_group(relevant, client)
 
@@ -1069,6 +1144,13 @@ def main():
                       f"(reportado el {entry['first_reported']} en {entry['report_file']})")
 
     pairs = phase_generate(groups, client, out_path)
+
+    # Mark successfully ficha'd URLs as seen so future runs skip them
+    successful_urls = {item["url"] for group, _ in pairs for item in group}
+    final_seen      = safe_to_skip | successful_urls
+    if successful_urls:
+        save_seen_urls(final_seen)
+        print(f"  [Memoria de URLs: {len(final_seen)} total tras añadir URLs con fichas exitosas]")
 
     # Persist new algorithms to pipeline history for future runs
     save_to_pipeline_history(pairs, out_name)

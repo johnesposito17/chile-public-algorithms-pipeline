@@ -1,0 +1,72 @@
+[
+  {
+    "canonical_name": "Alerta Oncológica",
+    "canonical_institution": "Ministerio de Salud (Minsal)",
+    "ficha_nombre": "Alerta Oncológica",
+    "first_reported": "2026-07-06",
+    "report_file": "pipeline_20260706_150925.docx",
+    "urls": [
+      "https://www.elobservatodo.cl/noticia/alerta-oncologica/33-mil-pacientes-fueron-abordados-por-la-alerta-oncologica-mientras-expert"
+    ]
+  },
+  {
+    "canonical_name": "Proyecto piloto de IA para admisibilidad de concesiones marítimas",
+    "canonical_institution": "Subsecretaría para las Fuerzas Armadas (Ministerio de Defensa Nacional)",
+    "ficha_nombre": "Proyecto piloto de inteligencia artificial para la admisibilidad de solicitudes de concesiones marítimas",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://www.radioagricultura.cl/noticias/nacional/defensa-y-transportes-se-coordinan-para-acelerar-proceso-de-concesiones-maritimas_20260702/"
+    ]
+  },
+  {
+    "canonical_name": "SuRIS (Surveillance and Risk-management of Illegal Sites)",
+    "canonical_institution": "Ministerio del Medio Ambiente",
+    "ficha_nombre": "SuRIS (Surveillance and Risk-management of Illegal Sites)",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://www.paiscircular.cl/medio-ambiente/ministerio-del-medio-ambiente-celebra-el-dia-de-la-tierra-con-innovador-piloto-tecnologico-para-identificar-vertederos-y-aprovechar-los-residuos-de-la-construccion/"
+    ]
+  },
+  {
+    "canonical_name": "PRECISION-AI",
+    "canonical_institution": "CORFO / Universidad del Desarrollo",
+    "ficha_nombre": "PRECISION-AI",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://g5noticias.cl/2026/07/06/el-programa-recibira-3-mil-millones-de-corfo-consorcio-chileno-desarrollara-siete-tecnologias-de-ia-en-cinco-anos-para-transformar-el-diagnostico-y-tratamiento-del-cancer/"
+    ]
+  },
+  {
+    "canonical_name": "Departamento de Inteligencia Fitozoosanitaria y de los Recursos Naturales",
+    "canonical_institution": "Servicio Agrícola y Ganadero (SAG)",
+    "ficha_nombre": "Departamento de Inteligencia Fitozoosanitaria y de los Recursos Naturales",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://mundoagro.io/cl/sag-inaugura-nuevo-departamento-de-inteligencia-para-anticipar-amenazas-fitozoosanitarias/"
+    ]
+  },
+  {
+    "canonical_name": "Sistema de reconocimiento facial para control de acceso en estadios",
+    "canonical_institution": "Delegación Presidencial de la Región Metropolitana",
+    "ficha_nombre": "Sistema de reconocimiento facial para control de acceso en estadios",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://auroranoticias.cl/deportes/gobierno-y-clubes-sellan-historico-acuerdo-para-el-regreso-de-ambas-hinchadas-a-los-grandes-clasicos-del-futbol-chileno/"
+    ]
+  },
+  {
+    "canonical_name": "Camión escáner con inteligencia artificial para control aduanero",
+    "canonical_institution": "Servicio Nacional de Aduanas de Chile",
+    "ficha_nombre": "Camión escáner con inteligencia artificial para control aduanero (Sistema móvil de inspección no intrusiva Nuctech MT1213 DE)",
+    "first_reported": "2026-07-06",
+    "report_file": "recuperados_20260706.docx",
+    "urls": [
+      "https://aduananews.com/chile-incorpora-un-camion-escaner-con-inteligencia-artificial-para-reforzar-el-control-aduanero/"
+    ]
+  }
+]
