@@ -246,6 +246,12 @@ INSTITUTIONAL_SOURCES = [
         "base": "https://www.interior.gob.cl",
         "article_only": True,
     },
+    # NOTE: two candidate sources were evaluated and dropped (2026-07-15):
+    #  - Registro Civil (/noticias): JS-rendered, no article links in static HTML.
+    #  - Superintendencia de Pensiones: article links are page-relative without a
+    #    leading slash (w3-article-NNNN.html), which resolve_href() drops. Adding
+    #    them would need a core resolve_href change (regression risk across all
+    #    sources) for low expected yield, so they stay out.
 ]
 
 HEADERS = {

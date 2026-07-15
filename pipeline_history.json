@@ -171,5 +171,45 @@
     "urls": [
       "https://www.redimin.cl/sii-lanza-nueva-herramienta-para-la-operacion-renta-2026-y-propondra-montos-en-el-formulario-22-por-primera-vez"
     ]
+  },
+  {
+    "canonical_name": "Proyecto piloto de IA para admisibilidad de concesiones marítimas y Proyecto piloto de imágenes satelitales",
+    "canonical_institution": "Subsecretaría para las Fuerzas Armadas (Ministerio de Defensa), Centro Nacional de Inteligencia Artificial (CENIA), Centro Espacial Nacional (CEN)",
+    "ficha_nombre": "Proyecto piloto de inteligencia artificial para la admisibilidad de solicitudes de concesiones marítimas",
+    "first_reported": "2026-07-15",
+    "report_file": "full_run_2026-07-15.docx",
+    "urls": [
+      "https://www.radioagricultura.cl/noticias/nacional/defensa-y-transportes-se-coordinan-para-acelerar-proceso-de-concesiones-maritimas_20260702/"
+    ]
+  },
+  {
+    "canonical_name": "Sistema de monitoreo automatizado del Observatorio de ChileCompra con IA para análisis de integridad en compras públicas",
+    "canonical_institution": "ChileCompra (Plataforma de Compras Públicas del Estado de Chile)",
+    "ficha_nombre": "Sistema de monitoreo automatizado del Observatorio de ChileCompra",
+    "first_reported": "2026-07-15",
+    "report_file": "full_run_2026-07-15.docx",
+    "urls": [
+      "https://www.chilecompra.cl/2026/07/chilecompra-presenta-en-instancia-internacional-impulsada-por-el-banco-mundial-experiencia-en-uso-de-ia-para-fortalecer-la-integridad-en-las-compras-publicas/"
+    ]
+  },
+  {
+    "canonical_name": "CasillaÚnica",
+    "canonical_institution": "Secretaría de Gobierno Digital (Ministerio Secretaría General de la Presidencia)",
+    "ficha_nombre": "CasillaÚnica - Sistema de Notificaciones Electrónicas del Estado",
+    "first_reported": "2026-07-15",
+    "report_file": "full_run_2026-07-15.docx",
+    "urls": [
+      "https://digital.gob.cl/media/noticias/gobierno-digital-inicia-fase-de-notificaciones-electronicas-con-casillaunica-en-la-administracion-central/"
+    ]
+  },
+  {
+    "canonical_name": "Chatbot Institucional Inteligente",
+    "canonical_institution": "Instituto de Seguridad Laboral (ISL)",
+    "ficha_nombre": "Chatbot Institucional Inteligente para el sitio web del Instituto de Seguridad Laboral (ISL)",
+    "first_reported": "2026-07-15",
+    "report_file": "full_run_2026-07-15.docx",
+    "urls": [
+      "http://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion=1415862-15-LE26"
+    ]
   }
 ]
